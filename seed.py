@@ -31,6 +31,7 @@ TEAM = [
     (None, "m_milewa", "Милена", UserRole.MEMBER),            # Постит новости по каналам
     (None, "arslanito", "Арслан", UserRole.MEMBER),           # Бэкап монтажёр, руководитель продакшна
     (None, "Guaho13", "Стас", UserRole.MEMBER),               # Звукорежиссёр
+    (None, "TheDirtyBandz", "Сарик Вайт", UserRole.MEMBER),      # Дизайнер
     
     # Management
     (None, "n_syuzi", "Сусанна", UserRole.ADMIN),                  # Коммерческий директор / финансы
