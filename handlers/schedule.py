@@ -416,6 +416,28 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
     
     text = f"✅ <b>Задача добавлена!</b>\n\n{format_item(item)}\n📅 {item.scheduled_date.strftime('%d.%m.%Y')}"
     
+    # Notify assignee instantly
+    if item.assignee and item.assignee.telegram_id and item.assignee.telegram_id != 0:
+        creator_id = callback.from_user.id if callback else message.from_user.id
+        if item.assignee.telegram_id != creator_id:  # don't notify yourself
+            weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            day_name = weekdays[item.scheduled_date.weekday()]
+            time_str = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else ""
+            project_str = f"\n📁 {item.project.emoji} {item.project.name}" if item.project else ""
+            desc_str = f"\n📎 {item.description}" if item.description else ""
+            
+            notify_text = (
+                f"📌 <b>Новая задача для тебя:</b>\n\n"
+                f"<b>{item.title}</b>\n"
+                f"📅 {day_name} {item.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
+                f"{project_str}{desc_str}"
+            )
+            try:
+                bot = message.bot if not callback else callback.message.bot
+                await bot.send_message(item.assignee.telegram_id, notify_text, parse_mode="HTML")
+            except Exception as e:
+                print(f"Failed to notify assignee: {e}")
+    
     target = callback.message if callback else message
     if callback:
         await target.edit_text(text, reply_markup=schedule_menu_kb(), parse_mode="HTML")
@@ -607,10 +629,33 @@ async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     async with async_session() as session:
-        result = await session.execute(select(ContentPlan).where(ContentPlan.id == cid))
+        result = await session.execute(
+            select(ContentPlan)
+            .options(selectinload(ContentPlan.project))
+            .where(ContentPlan.id == cid)
+        )
         c = result.scalar_one_or_none()
         if c:
             c.assignee_id = assignee_id
+            await session.commit()
+            
+            # Notify new assignee
+            if assignee_id:
+                user_r = await session.execute(select(User).where(User.id == assignee_id))
+                new_assignee = user_r.scalar_one_or_none()
+                if new_assignee and new_assignee.telegram_id and new_assignee.telegram_id != 0 and new_assignee.telegram_id != callback.from_user.id:
+                    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+                    day_name = weekdays[c.scheduled_date.weekday()]
+                    time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+                    notify = (
+                        f"📌 <b>Тебе назначена задача:</b>\n\n"
+                        f"<b>{c.title}</b>\n"
+                        f"📅 {day_name} {c.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
+                    )
+                    try:
+                        await callback.message.bot.send_message(new_assignee.telegram_id, notify, parse_mode="HTML")
+                    except Exception:
+                        pass
             await session.commit()
     
     await callback.answer("✅ Ответственный изменён", show_alert=True)
