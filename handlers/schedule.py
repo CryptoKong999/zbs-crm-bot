@@ -445,9 +445,14 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
                 f"📅 {day_name} {item.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
                 f"{project_str}{desc_str}"
             )
+            notify_kb = InlineKeyboardBuilder()
+            notify_kb.row(
+                InlineKeyboardButton(text="✅ Принял", callback_data=f"sst:{item.id}:progress"),
+                InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{item.id}"),
+            )
             try:
                 bot = message.bot if not callback else callback.message.bot
-                await bot.send_message(item.assignee.telegram_id, notify_text, parse_mode="HTML")
+                await bot.send_message(item.assignee.telegram_id, notify_text, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
             except Exception as e:
                 print(f"Failed to notify assignee: {e}")
     
@@ -823,8 +828,13 @@ async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
                         f"<b>{c.title}</b>\n"
                         f"📅 {day_name} {c.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
                     )
+                    notify_kb = InlineKeyboardBuilder()
+                    notify_kb.row(
+                        InlineKeyboardButton(text="✅ Принял", callback_data=f"sst:{cid}:progress"),
+                        InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{cid}"),
+                    )
                     try:
-                        await callback.message.bot.send_message(new_assignee.telegram_id, notify, parse_mode="HTML")
+                        await callback.message.bot.send_message(new_assignee.telegram_id, notify, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
                     except Exception:
                         pass
             await session.commit()

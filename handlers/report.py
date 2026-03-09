@@ -146,30 +146,48 @@ async def send_morning_report(bot: Bot):
 
 async def send_morning_reminders(bot: Bot):
     """10:00 — Remind assignees about today's tasks"""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
     items = await _get_items_for_date(date.today())
     for tg_id, tasks in _group_by_user(items).items():
         lines = ["⏰ <b>Сегодня у тебя:</b>\n"]
+        builder = InlineKeyboardBuilder()
         for c in tasks:
             t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
             lines.append(f"  📝 {t} {c.title}")
+            short = c.title[:20] + ".." if len(c.title) > 20 else c.title
+            builder.row(
+                InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:progress"),
+                InlineKeyboardButton(text=f"📆", callback_data=f"resched:{c.id}"),
+            )
         try:
-            await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+            await bot.send_message(tg_id, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"Morning remind failed {tg_id}: {e}")
 
 
 async def send_day_before_reminders(bot: Bot):
     """20:00 — Remind assignees about tomorrow's tasks"""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
     tomorrow = date.today() + timedelta(days=1)
     wd = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     items = await _get_items_for_date(tomorrow)
     for tg_id, tasks in _group_by_user(items).items():
         lines = [f"📅 <b>Завтра ({wd[tomorrow.weekday()]} {tomorrow.strftime('%d.%m')}):</b>\n"]
+        builder = InlineKeyboardBuilder()
         for c in tasks:
             t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
             lines.append(f"  📝 {t} {c.title}")
+            short = c.title[:20] + ".." if len(c.title) > 20 else c.title
+            builder.row(
+                InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:progress"),
+                InlineKeyboardButton(text=f"📆", callback_data=f"resched:{c.id}"),
+            )
         try:
-            await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+            await bot.send_message(tg_id, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"Day-before remind failed {tg_id}: {e}")
 
@@ -199,9 +217,17 @@ async def send_hourly_reminders(bot: Bot):
     for c in items:
         if c.scheduled_time and c.scheduled_time.hour == next_h:
             if c.assignee and c.assignee.telegram_id and c.assignee.telegram_id != 0:
+                from aiogram.utils.keyboard import InlineKeyboardBuilder
+                from aiogram.types import InlineKeyboardButton
+                
                 text = f"🔔 <b>Через час ({c.scheduled_time.strftime('%H:%M')}):</b>\n\n{c.title}"
+                builder = InlineKeyboardBuilder()
+                builder.row(
+                    InlineKeyboardButton(text="✅ В работе", callback_data=f"sst:{c.id}:progress"),
+                    InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{c.id}"),
+                )
                 try:
-                    await bot.send_message(c.assignee.telegram_id, text, parse_mode="HTML")
+                    await bot.send_message(c.assignee.telegram_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
                 except Exception as e:
                     print(f"Hourly remind failed: {e}")
 
