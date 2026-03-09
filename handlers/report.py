@@ -1,174 +1,99 @@
 """
-ZBS CRM Bot — Daily Report & Scheduler
-Automated reminders and daily digest
+ZBS CRM Bot — Daily Report & Reminders
+Schedule: 09:00 report, 10:00 morning remind, hourly 1hr-before, 20:00 day-before, 11:00 overdue
 """
 
 import os
-import asyncio
 from datetime import date, datetime, timedelta, time as dt_time
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_
 from sqlalchemy.orm import selectinload
+import pytz
 
 from database import (
-    async_session, ContentPlan, Task, Deal, Finance, User, Project,
-    ContentStatus, TaskStatus, TaskPriority, DealStatus, FinanceType
+    async_session, ContentPlan, Deal, Finance,
+    ContentStatus, DealStatus, FinanceType
 )
 from keyboards import back_to_menu_kb
 
 router = Router()
+TZ = pytz.timezone(os.environ.get("TZ", "Asia/Tashkent"))
 
-
-# ==================== Daily Report ====================
 
 async def generate_daily_report() -> str:
-    """Generate daily report text"""
     today = date.today()
     tomorrow = today + timedelta(days=1)
     
     async with async_session() as session:
-        # Today's content
-        content_result = await session.execute(
-            select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+        today_r = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
             .where(ContentPlan.scheduled_date == today)
             .order_by(ContentPlan.scheduled_time.asc().nulls_last())
         )
-        today_content = content_result.scalars().all()
+        today_items = today_r.scalars().all()
         
-        # Tomorrow's content
-        tomorrow_result = await session.execute(
-            select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee))
+        tomorrow_r = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee))
             .where(ContentPlan.scheduled_date == tomorrow)
             .order_by(ContentPlan.scheduled_time.asc().nulls_last())
         )
-        tomorrow_content = tomorrow_result.scalars().all()
+        tomorrow_items = tomorrow_r.scalars().all()
         
-        # Overdue tasks
-        overdue_result = await session.execute(
-            select(Task)
-            .options(selectinload(Task.assignee))
-            .where(and_(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]),
-                Task.deadline < datetime.combine(today, dt_time.min)
-            ))
-            .order_by(Task.deadline.asc())
+        overdue_r = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            .where(and_(ContentPlan.scheduled_date < today, ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])))
+            .order_by(ContentPlan.scheduled_date.asc()).limit(10)
         )
-        overdue_tasks = overdue_result.scalars().all()
+        overdue = overdue_r.scalars().all()
         
-        # Today's deadlines
-        today_deadline_result = await session.execute(
-            select(Task)
-            .options(selectinload(Task.assignee))
-            .where(and_(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]),
-                Task.deadline >= datetime.combine(today, dt_time.min),
-                Task.deadline <= datetime.combine(today, dt_time.max)
-            ))
+        deals_r = await session.execute(
+            select(Deal).options(selectinload(Deal.client))
+            .where(Deal.status.in_([DealStatus.LEAD, DealStatus.NEGOTIATION, DealStatus.PROPOSAL, DealStatus.CONTRACT, DealStatus.ACTIVE]))
         )
-        today_tasks = today_deadline_result.scalars().all()
+        active_deals = deals_r.scalars().all()
         
-        # Urgent tasks
-        urgent_result = await session.execute(
-            select(Task)
-            .options(selectinload(Task.assignee))
-            .where(and_(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]),
-                Task.priority == TaskPriority.URGENT
-            ))
-        )
-        urgent_tasks = urgent_result.scalars().all()
-        
-        # Active deals
-        deals_result = await session.execute(
-            select(Deal)
-            .options(selectinload(Deal.client))
-            .where(Deal.status.in_([
-                DealStatus.LEAD, DealStatus.NEGOTIATION, 
-                DealStatus.PROPOSAL, DealStatus.CONTRACT, DealStatus.ACTIVE
-            ]))
-        )
-        active_deals = deals_result.scalars().all()
-        
-        # Month finances
         month_start = today.replace(day=1)
-        inc = await session.execute(
-            select(func.coalesce(func.sum(Finance.amount), 0))
-            .where(Finance.type == FinanceType.INCOME, Finance.record_date >= month_start)
-        )
-        exp = await session.execute(
-            select(func.coalesce(func.sum(Finance.amount), 0))
-            .where(Finance.type == FinanceType.EXPENSE, Finance.record_date >= month_start)
-        )
-        income = inc.scalar() or 0
-        expense = exp.scalar() or 0
+        inc = (await session.execute(select(func.coalesce(func.sum(Finance.amount), 0)).where(Finance.type == FinanceType.INCOME, Finance.record_date >= month_start))).scalar() or 0
+        exp = (await session.execute(select(func.coalesce(func.sum(Finance.amount), 0)).where(Finance.type == FinanceType.EXPENSE, Finance.record_date >= month_start))).scalar() or 0
     
-    # Build report
-    weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-    lines = [
-        f"📊 <b>ОТЧЁТ ДНЯ — {weekdays[today.weekday()]}, {today.strftime('%d.%m.%Y')}</b>",
-        f"{'═' * 30}\n",
-    ]
+    wd = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    lines = [f"📊 <b>ОТЧЁТ — {wd[today.weekday()]}, {today.strftime('%d.%m.%Y')}</b>\n"]
     
-    # Overdue
-    if overdue_tasks:
-        lines.append(f"🚨 <b>ПРОСРОЧЕНО ({len(overdue_tasks)}):</b>")
-        for t in overdue_tasks[:5]:
-            assignee = f" → {t.assignee.full_name}" if t.assignee else ""
-            days = (today - t.deadline.date()).days
-            lines.append(f"  ⚠️ {t.title}{assignee} ({days}д назад)")
+    if overdue:
+        lines.append(f"🚨 <b>ПРОСРОЧЕНО ({len(overdue)}):</b>")
+        for c in overdue:
+            a = f" → {c.assignee.full_name}" if c.assignee else ""
+            lines.append(f"  ⚠️ {c.title}{a} ({(today - c.scheduled_date).days}д)")
         lines.append("")
     
-    # Today's content
-    lines.append(f"📅 <b>КОНТЕНТ СЕГОДНЯ ({len(today_content)}):</b>")
-    if today_content:
-        published = sum(1 for c in today_content if c.status == ContentStatus.PUBLISHED)
-        for c in today_content:
-            status = "✅" if c.status == ContentStatus.PUBLISHED else "⬜"
-            time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "—"
-            assignee = f" → {c.assignee.full_name}" if c.assignee else ""
-            lines.append(f"  {status} {time_str} {c.title}{assignee}")
-        lines.append(f"  📊 Готово: {published}/{len(today_content)}")
+    lines.append(f"📅 <b>СЕГОДНЯ ({len(today_items)}):</b>")
+    if today_items:
+        done = sum(1 for c in today_items if c.status == ContentStatus.PUBLISHED)
+        for c in today_items:
+            s = "✅" if c.status == ContentStatus.PUBLISHED else "⬜"
+            t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "—"
+            a = f" → {c.assignee.full_name}" if c.assignee else ""
+            lines.append(f"  {s} {t} {c.title}{a}")
+        lines.append(f"  Готово: {done}/{len(today_items)}")
     else:
-        lines.append("  ✨ Ничего не запланировано")
+        lines.append("  ✨ Пусто")
     lines.append("")
     
-    # Tomorrow preview
-    if tomorrow_content:
-        lines.append(f"📆 <b>ЗАВТРА ({len(tomorrow_content)}):</b>")
-        for c in tomorrow_content[:5]:
-            assignee = f" → {c.assignee.full_name}" if c.assignee else ""
-            lines.append(f"  📝 {c.title}{assignee}")
+    if tomorrow_items:
+        lines.append(f"📆 <b>ЗАВТРА ({len(tomorrow_items)}):</b>")
+        for c in tomorrow_items:
+            a = f" → {c.assignee.full_name}" if c.assignee else ""
+            t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+            lines.append(f"  📝 {t} {c.title}{a}")
         lines.append("")
     
-    # Today's deadlines + urgent
-    critical = list(set(today_tasks + urgent_tasks))
-    if critical:
-        lines.append(f"🔥 <b>ТРЕБУЕТ ВНИМАНИЯ ({len(critical)}):</b>")
-        for t in critical:
-            emoji = "⏰" if t in today_tasks else "🔴"
-            assignee = f" → {t.assignee.full_name}" if t.assignee else ""
-            lines.append(f"  {emoji} {t.title}{assignee}")
-        lines.append("")
-    
-    # Deals summary
     if active_deals:
-        pipeline_total = sum(d.amount or 0 for d in active_deals)
-        lines.append(f"💼 <b>СДЕЛКИ:</b> {len(active_deals)} активных — ${pipeline_total:,.0f}")
-        # Show deals requiring attention (proposals/negotiations)
-        hot_deals = [d for d in active_deals if d.status in (DealStatus.NEGOTIATION, DealStatus.PROPOSAL)]
-        for d in hot_deals[:3]:
-            amount = f" ${d.amount:,.0f}" if d.amount else ""
-            lines.append(f"  🟡 {d.title} ({d.client.name}){amount}")
-        lines.append("")
+        total = sum(d.amount or 0 for d in active_deals)
+        lines.append(f"💼 <b>СДЕЛКИ:</b> {len(active_deals)} — ${total:,.0f}")
     
-    # Finance
-    lines.append(f"💰 <b>ФИНАНСЫ ({today.strftime('%B')}):</b>")
-    lines.append(f"  💵 +${income:,.0f}  💸 -${expense:,.0f}  📊 ${income-expense:,.0f}")
-    
+    lines.append(f"💰 <b>{today.strftime('%B')}:</b> +${inc:,.0f} -${exp:,.0f} = ${inc - exp:,.0f}")
     return "\n".join(lines)
 
 
@@ -176,7 +101,6 @@ async def generate_daily_report() -> str:
 @router.message(Command("report"))
 async def daily_report(event, state=None):
     report = await generate_daily_report()
-    
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(report, reply_markup=back_to_menu_kb(), parse_mode="HTML")
         await event.answer()
@@ -184,115 +108,123 @@ async def daily_report(event, state=None):
         await event.answer(report, reply_markup=back_to_menu_kb(), parse_mode="HTML")
 
 
-# ==================== Scheduler Functions ====================
+# ==================== REMINDERS ====================
+
+async def _get_items_for_date(target_date):
+    async with async_session() as session:
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            .where(and_(
+                ContentPlan.scheduled_date == target_date,
+                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS]),
+                ContentPlan.assignee_id.isnot(None)
+            ))
+        )
+        return result.scalars().all()
+
+
+def _group_by_user(items):
+    by_user = {}
+    for c in items:
+        if c.assignee and c.assignee.telegram_id and c.assignee.telegram_id != 0:
+            by_user.setdefault(c.assignee.telegram_id, []).append(c)
+    return by_user
+
 
 async def send_morning_report(bot: Bot):
-    """Send daily report to admins at 9:00 Tashkent"""
+    """09:00 — Daily report to admins"""
     report = await generate_daily_report()
-    
-    admin_ids_str = os.environ.get("ADMIN_IDS", "")
-    admin_ids = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
-    
-    for admin_id in admin_ids:
+    for aid in [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]:
         try:
-            await bot.send_message(admin_id, report, parse_mode="HTML")
+            await bot.send_message(aid, report, parse_mode="HTML")
         except Exception as e:
-            print(f"Failed to send report to {admin_id}: {e}")
+            print(f"Report failed {aid}: {e}")
 
 
-async def send_deadline_reminders(bot: Bot):
-    """Send reminders for upcoming deadlines"""
-    today = date.today()
-    tomorrow = today + timedelta(days=1)
+async def send_morning_reminders(bot: Bot):
+    """10:00 — Remind assignees about today's tasks"""
+    items = await _get_items_for_date(date.today())
+    for tg_id, tasks in _group_by_user(items).items():
+        lines = ["⏰ <b>Сегодня у тебя:</b>\n"]
+        for c in tasks:
+            t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+            lines.append(f"  📝 {t} {c.title}")
+        try:
+            await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            print(f"Morning remind failed {tg_id}: {e}")
+
+
+async def send_day_before_reminders(bot: Bot):
+    """20:00 — Remind assignees about tomorrow's tasks"""
+    tomorrow = date.today() + timedelta(days=1)
+    wd = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    items = await _get_items_for_date(tomorrow)
+    for tg_id, tasks in _group_by_user(items).items():
+        lines = [f"📅 <b>Завтра ({wd[tomorrow.weekday()]} {tomorrow.strftime('%d.%m')}):</b>\n"]
+        for c in tasks:
+            t = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+            lines.append(f"  📝 {t} {c.title}")
+        try:
+            await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            print(f"Day-before remind failed {tg_id}: {e}")
+
+
+async def send_hourly_reminders(bot: Bot):
+    """Every hour — notify if task starts in next hour"""
+    now = datetime.now(TZ)
+    today = now.date()
+    current_h = now.hour
+    next_h = current_h + 1
+    
+    if next_h > 23:
+        return
     
     async with async_session() as session:
-        # Tasks due today or tomorrow
         result = await session.execute(
-            select(Task)
-            .options(selectinload(Task.assignee))
-            .where(and_(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]),
-                Task.deadline >= datetime.combine(today, dt_time.min),
-                Task.deadline <= datetime.combine(tomorrow, dt_time.max)
-            ))
-        )
-        tasks = result.scalars().all()
-        
-        # Content planned for today that's not published
-        content_result = await session.execute(
-            select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee))
+            select(ContentPlan).options(selectinload(ContentPlan.assignee))
             .where(and_(
                 ContentPlan.scheduled_date == today,
-                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])
+                ContentPlan.scheduled_time.isnot(None),
+                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS]),
+                ContentPlan.assignee_id.isnot(None)
             ))
         )
-        content = content_result.scalars().all()
+        items = result.scalars().all()
     
-    # Send task reminders
-    for t in tasks:
-        if t.assignee:
-            is_today = t.deadline.date() == today
-            emoji = "⏰" if is_today else "📅"
-            when = "СЕГОДНЯ" if is_today else "ЗАВТРА"
-            text = (
-                f"{emoji} <b>Напоминание</b>\n\n"
-                f"Задача: <b>{t.title}</b>\n"
-                f"Дедлайн: <b>{when}</b> ({t.deadline.strftime('%d.%m %H:%M')})"
-            )
-            try:
-                await bot.send_message(t.assignee.telegram_id, text, parse_mode="HTML")
-            except Exception as e:
-                print(f"Reminder failed for {t.assignee.full_name}: {e}")
-    
-    # Send content reminders
-    for c in content:
-        if c.assignee:
-            time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "сегодня"
-            text = (
-                f"📅 <b>Контент-напоминание</b>\n\n"
-                f"<b>{c.title}</b>\n"
-                f"Публикация: {time_str}\n"
-                f"Статус: {'🔄 В работе' if c.status == ContentStatus.IN_PROGRESS else '📝 Запланировано'}"
-            )
-            try:
-                await bot.send_message(c.assignee.telegram_id, text, parse_mode="HTML")
-            except Exception as e:
-                print(f"Content reminder failed for {c.assignee.full_name}: {e}")
+    for c in items:
+        if c.scheduled_time and c.scheduled_time.hour == next_h:
+            if c.assignee and c.assignee.telegram_id and c.assignee.telegram_id != 0:
+                text = f"🔔 <b>Через час ({c.scheduled_time.strftime('%H:%M')}):</b>\n\n{c.title}"
+                try:
+                    await bot.send_message(c.assignee.telegram_id, text, parse_mode="HTML")
+                except Exception as e:
+                    print(f"Hourly remind failed: {e}")
 
 
 async def send_overdue_alerts(bot: Bot):
-    """Alert admins about overdue tasks"""
+    """11:00 — Alert admins about overdue"""
     today = date.today()
-    
     async with async_session() as session:
         result = await session.execute(
-            select(Task)
-            .options(selectinload(Task.assignee))
-            .where(and_(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]),
-                Task.deadline < datetime.combine(today, dt_time.min)
-            ))
-            .order_by(Task.deadline.asc())
+            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            .where(and_(ContentPlan.scheduled_date < today, ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])))
+            .order_by(ContentPlan.scheduled_date.asc())
         )
         overdue = result.scalars().all()
     
     if not overdue:
         return
     
-    lines = [f"🚨 <b>Просроченные задачи ({len(overdue)}):</b>\n"]
-    for t in overdue:
-        days = (today - t.deadline.date()).days
-        assignee = f" → {t.assignee.full_name}" if t.assignee else " → не назначено"
-        lines.append(f"⚠️ {t.title}{assignee} ({days}д)")
+    lines = [f"🚨 <b>Просрочено ({len(overdue)}):</b>\n"]
+    for c in overdue:
+        a = f" → {c.assignee.full_name}" if c.assignee else ""
+        lines.append(f"⚠️ {c.title}{a} ({(today - c.scheduled_date).days}д)")
     
     text = "\n".join(lines)
-    
-    admin_ids_str = os.environ.get("ADMIN_IDS", "")
-    admin_ids = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
-    
-    for admin_id in admin_ids:
+    for aid in [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]:
         try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
+            await bot.send_message(aid, text, parse_mode="HTML")
         except Exception as e:
-            print(f"Overdue alert failed for {admin_id}: {e}")
+            print(f"Overdue alert failed: {e}")

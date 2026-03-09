@@ -9,7 +9,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
-from database import async_session, User, UserRole
+from database import async_session, User, UserRole, Project
 from keyboards import main_menu_kb, admin_menu_kb, back_to_menu_kb
 
 router = Router()
@@ -129,10 +129,9 @@ async def cmd_help(message: Message):
         "📖 <b>Команды ZBS CRM Bot</b>\n\n"
         "/start — Запуск бота\n"
         "/menu — Главное меню\n"
-        "/today — Контент на сегодня\n"
+        "/today — Расписание на сегодня\n"
         "/mytasks — Мои задачи\n"
-        "/addtask — Быстро создать задачу\n"
-        "/addcontent — Добавить контент в план\n"
+        "/addtask — Добавить задачу\n"
         "/report — Отчёт дня\n"
         "/help — Эта справка\n"
     )
@@ -192,7 +191,75 @@ async def admin_team(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==================== Admin: Stats ====================
+# ==================== Admin: Projects ====================
+
+@router.callback_query(F.data == "admin:projects")
+async def admin_projects(callback: CallbackQuery):
+    async with async_session() as session:
+        result = await session.execute(
+            select(Project).where(Project.is_active == True).order_by(Project.name)
+        )
+        projects = result.scalars().all()
+    
+    lines = ["📁 <b>Проекты ZBS</b>\n"]
+    for p in projects:
+        lines.append(f"{p.emoji} {p.name}")
+        if p.description:
+            lines.append(f"   <i>{p.description[:50]}</i>")
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Новый проект", callback_data="admin:add_project"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:admin"))
+    
+    await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+from aiogram.fsm.state import State, StatesGroup as SG
+
+class AddProject(SG):
+    name = State()
+    emoji = State()
+
+
+@router.callback_query(F.data == "admin:add_project")
+async def admin_add_project(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AddProject.name)
+    await callback.message.edit_text("📁 Название нового проекта:")
+    await callback.answer()
+
+
+@router.message(AddProject.name)
+async def admin_project_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(AddProject.emoji)
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    emojis = ["📁", "🎙", "📰", "🎬", "🎵", "📸", "💼", "🏔", "🍌", "⚡"]
+    builder = InlineKeyboardBuilder()
+    for i in range(0, len(emojis), 5):
+        row = [InlineKeyboardButton(text=e, callback_data=f"projemoji:{e}") for e in emojis[i:i+5]]
+        builder.row(*row)
+    
+    await message.answer("Выбери иконку:", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("projemoji:"), AddProject.emoji)
+async def admin_project_emoji(callback: CallbackQuery, state: FSMContext):
+    emoji = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    await state.clear()
+    
+    async with async_session() as session:
+        project = Project(name=data["name"], emoji=emoji)
+        session.add(project)
+        await session.commit()
+    
+    await callback.answer(f"✅ Проект {emoji} {data['name']} создан!", show_alert=True)
+    await admin_projects(callback)
 
 @router.callback_query(F.data == "admin:stats")
 async def admin_stats(callback: CallbackQuery):

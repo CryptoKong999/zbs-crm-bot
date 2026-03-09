@@ -27,12 +27,13 @@ import pytz
 from database import init_db, seed_defaults
 from seed import seed as seed_data
 from handlers import (
-    common_router, content_router, crm_router,
-    tasks_router, finance_router, report_router
+    common_router, schedule_router, crm_router,
+    finance_router, report_router
 )
 from handlers.common import ADMIN_IDS
 from handlers.report import (
-    send_morning_report, send_deadline_reminders, send_overdue_alerts
+    send_morning_report, send_morning_reminders, 
+    send_day_before_reminders, send_hourly_reminders, send_overdue_alerts
 )
 
 # Logging
@@ -96,9 +97,8 @@ async def main():
     
     # Register routers
     dp.include_router(common_router)
-    dp.include_router(content_router)
+    dp.include_router(schedule_router)
     dp.include_router(crm_router)
-    dp.include_router(tasks_router)
     dp.include_router(finance_router)
     dp.include_router(report_router)
     
@@ -114,16 +114,16 @@ async def main():
         name="Morning Daily Report"
     )
     
-    # Deadline reminders at 10:00 Tashkent
+    # Morning reminders at 10:00 (today's tasks to assignees)
     scheduler.add_job(
-        send_deadline_reminders,
+        send_morning_reminders,
         CronTrigger(hour=10, minute=0, timezone=TIMEZONE),
         args=[bot],
-        id="deadline_reminders",
-        name="Deadline Reminders"
+        id="morning_reminders",
+        name="Morning Task Reminders"
     )
     
-    # Overdue alerts at 11:00 Tashkent (to admins only)
+    # Overdue alerts at 11:00 (to admins)
     scheduler.add_job(
         send_overdue_alerts,
         CronTrigger(hour=11, minute=0, timezone=TIMEZONE),
@@ -132,21 +132,31 @@ async def main():
         name="Overdue Task Alerts"
     )
     
-    # Evening content check at 20:00
+    # Hourly reminders (1 hour before task) 8:00-20:00
     scheduler.add_job(
-        send_deadline_reminders,
+        send_hourly_reminders,
+        CronTrigger(hour="8-20", minute=0, timezone=TIMEZONE),
+        args=[bot],
+        id="hourly_reminders",
+        name="Hourly Before-Task Reminders"
+    )
+    
+    # Day-before reminders at 20:00 (tomorrow's tasks to assignees)
+    scheduler.add_job(
+        send_day_before_reminders,
         CronTrigger(hour=20, minute=0, timezone=TIMEZONE),
         args=[bot],
-        id="evening_reminders",
-        name="Evening Content Check"
+        id="day_before_reminders",
+        name="Day-Before Reminders"
     )
     
     scheduler.start()
     logger.info(f"⏰ Scheduler started (timezone: {TIMEZONE})")
-    logger.info("   09:00 — Morning report")
-    logger.info("   10:00 — Deadline reminders")
-    logger.info("   11:00 — Overdue alerts")
-    logger.info("   20:00 — Evening content check")
+    logger.info("   09:00 — Morning report (admins)")
+    logger.info("   10:00 — Morning reminders (assignees)")
+    logger.info("   11:00 — Overdue alerts (admins)")
+    logger.info("   8-20h — Hourly 1hr-before reminders")
+    logger.info("   20:00 — Day-before reminders (assignees)")
     
     # Run startup
     await on_startup(bot)

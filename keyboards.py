@@ -17,14 +17,11 @@ from database import (
 def main_menu_kb(role: UserRole = UserRole.MEMBER) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📅 Контент", callback_data="menu:content"),
+        InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
         InlineKeyboardButton(text="👥 Клиенты", callback_data="menu:clients"),
     )
     builder.row(
-        InlineKeyboardButton(text="📋 Задачи", callback_data="menu:tasks"),
         InlineKeyboardButton(text="💰 Финансы", callback_data="menu:finance"),
-    )
-    builder.row(
         InlineKeyboardButton(text="📊 Отчёт дня", callback_data="menu:report"),
     )
     if role in (UserRole.ADMIN, UserRole.MANAGER):
