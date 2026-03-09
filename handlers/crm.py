@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from database import (
-    async_session, Client, Deal, DealStatus, Project
+    async_session, Client, Deal, DealStatus, Project, User
 )
 from keyboards import (
     clients_menu_kb, deal_status_kb, client_select_kb,
@@ -21,6 +21,11 @@ from keyboards import (
 )
 
 router = Router()
+
+async def _get_user_id(tg_id: int) -> int | None:
+    async with async_session() as session:
+        result = await session.execute(select(User.id).where(User.telegram_id == tg_id))
+        return result.scalar_one_or_none()
 
 DEAL_STATUS_EMOJI = {
     DealStatus.LEAD: "🔵",
@@ -77,9 +82,14 @@ async def clients_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "clients:list")
 async def clients_list(callback: CallbackQuery):
+    user_id = await _get_user_id(callback.from_user.id)
+    
     async with async_session() as session:
         result = await session.execute(
-            select(Client).where(Client.is_active == True).order_by(Client.name)
+            select(Client).where(
+                Client.is_active == True,
+                Client.created_by_user_id == user_id
+            ).order_by(Client.name)
         )
         clients = result.scalars().all()
         
@@ -239,7 +249,10 @@ async def client_add_notes(message: Message, state: FSMContext):
 
 async def _save_client(message: Message, state: FSMContext, callback: CallbackQuery = None):
     data = await state.get_data()
+    tg_id = callback.from_user.id if callback else message.from_user.id
     await state.clear()
+    
+    user_id = await _get_user_id(tg_id)
     
     async with async_session() as session:
         client = Client(
@@ -247,6 +260,7 @@ async def _save_client(message: Message, state: FSMContext, callback: CallbackQu
             contact_person=data.get("contact_person"),
             contact_telegram=data.get("contact_telegram"),
             notes=data.get("notes"),
+            created_by_user_id=user_id,
         )
         session.add(client)
         await session.commit()
@@ -264,11 +278,16 @@ async def _save_client(message: Message, state: FSMContext, callback: CallbackQu
 
 @router.callback_query(F.data == "deals:list")
 async def deals_list(callback: CallbackQuery):
+    user_id = await _get_user_id(callback.from_user.id)
+    
     async with async_session() as session:
         result = await session.execute(
             select(Deal)
             .options(selectinload(Deal.client), selectinload(Deal.project))
-            .where(Deal.status.notin_([DealStatus.COMPLETED, DealStatus.LOST]))
+            .where(
+                Deal.status.notin_([DealStatus.COMPLETED, DealStatus.LOST]),
+                Deal.created_by_user_id == user_id
+            )
             .order_by(Deal.status, Deal.deadline.asc().nulls_last())
         )
         deals = result.scalars().all()
@@ -308,11 +327,16 @@ async def deals_list(callback: CallbackQuery):
 
 @router.callback_query(F.data == "deals:pipeline")
 async def deals_pipeline(callback: CallbackQuery):
+    user_id = await _get_user_id(callback.from_user.id)
+    
     async with async_session() as session:
         result = await session.execute(
             select(Deal)
             .options(selectinload(Deal.client))
-            .where(Deal.status.notin_([DealStatus.COMPLETED, DealStatus.LOST]))
+            .where(
+                Deal.status.notin_([DealStatus.COMPLETED, DealStatus.LOST]),
+                Deal.created_by_user_id == user_id
+            )
             .order_by(Deal.amount.desc().nulls_last())
         )
         deals = result.scalars().all()
@@ -417,9 +441,11 @@ async def deal_change_status(callback: CallbackQuery):
 
 @router.callback_query(F.data == "deals:add")
 async def deal_add_start(callback: CallbackQuery, state: FSMContext):
+    user_id = await _get_user_id(callback.from_user.id)
+    
     async with async_session() as session:
         result = await session.execute(
-            select(Client).where(Client.is_active == True).order_by(Client.name)
+            select(Client).where(Client.is_active == True, Client.created_by_user_id == user_id).order_by(Client.name)
         )
         clients = result.scalars().all()
     
@@ -517,7 +543,10 @@ async def deal_add_desc(message: Message, state: FSMContext):
 
 async def _save_deal(message: Message, state: FSMContext, callback: CallbackQuery = None):
     data = await state.get_data()
+    tg_id = callback.from_user.id if callback else message.from_user.id
     await state.clear()
+    
+    user_id = await _get_user_id(tg_id)
     
     async with async_session() as session:
         deal = Deal(
@@ -527,6 +556,7 @@ async def _save_deal(message: Message, state: FSMContext, callback: CallbackQuer
             amount=data.get("amount", 0),
             description=data.get("description"),
             status=DealStatus.LEAD,
+            created_by_user_id=user_id,
         )
         session.add(deal)
         await session.commit()

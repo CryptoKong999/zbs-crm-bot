@@ -126,10 +126,12 @@ class Client(Base):
     contact_telegram = Column(String(100))
     notes = Column(Text)
     is_active = Column(Boolean, default=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, server_default=func.now())
     
     # Relationships
     deals = relationship("Deal", back_populates="client")
+    creator = relationship("User", foreign_keys=[created_by_user_id])
 
 
 class Deal(Base):
@@ -145,6 +147,7 @@ class Deal(Base):
     currency = Column(String(10), default="USD")
     description = Column(Text)
     deadline = Column(Date)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     
@@ -152,6 +155,7 @@ class Deal(Base):
     client = relationship("Client", back_populates="deals")
     project = relationship("Project", back_populates="deals")
     content_plans = relationship("ContentPlan", back_populates="deal")
+    creator = relationship("User", foreign_keys=[created_by_user_id])
 
     __table_args__ = (
         Index("idx_deal_status", "status"),
