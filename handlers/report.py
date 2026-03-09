@@ -100,7 +100,10 @@ async def generate_daily_report() -> str:
 @router.callback_query(F.data == "menu:report")
 @router.message(Command("report"))
 async def daily_report(event, state=None):
-    report = await generate_daily_report()
+    try:
+        report = await generate_daily_report()
+    except Exception as e:
+        report = f"❌ Ошибка генерации отчёта:\n<code>{str(e)[:200]}</code>"
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(report, reply_markup=back_to_menu_kb(), parse_mode="HTML")
         await event.answer()

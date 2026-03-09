@@ -263,88 +263,42 @@ async def admin_project_emoji(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin:stats")
 async def admin_stats(callback: CallbackQuery):
-    from sqlalchemy import func, text
-    from database import ContentPlan, Task, Deal, Finance, ContentStatus, TaskStatus, DealStatus, FinanceType
-    from datetime import date, timedelta
+    from sqlalchemy import func
+    from database import ContentPlan, Deal, Finance, ContentStatus, DealStatus, FinanceType
+    from datetime import date
     
     today = date.today()
     month_start = today.replace(day=1)
     
-    async with async_session() as session:
-        # Content stats this month
-        content_total = await session.execute(
-            select(func.count(ContentPlan.id)).where(ContentPlan.scheduled_date >= month_start)
-        )
-        content_published = await session.execute(
-            select(func.count(ContentPlan.id)).where(
-                ContentPlan.scheduled_date >= month_start,
-                ContentPlan.status == ContentStatus.PUBLISHED
-            )
-        )
+    try:
+        async with async_session() as session:
+            ct = (await session.execute(select(func.count(ContentPlan.id)).where(ContentPlan.scheduled_date >= month_start))).scalar() or 0
+            cp = (await session.execute(select(func.count(ContentPlan.id)).where(ContentPlan.scheduled_date >= month_start, ContentPlan.status == ContentStatus.PUBLISHED))).scalar() or 0
+            
+            open_tasks = (await session.execute(select(func.count(ContentPlan.id)).where(ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])))).scalar() or 0
+            
+            ad = (await session.execute(select(func.count(Deal.id)).where(Deal.status.in_([DealStatus.LEAD, DealStatus.NEGOTIATION, DealStatus.PROPOSAL, DealStatus.CONTRACT, DealStatus.ACTIVE])))).scalar() or 0
+            ds = (await session.execute(select(func.coalesce(func.sum(Deal.amount), 0)).where(Deal.status.in_([DealStatus.ACTIVE, DealStatus.CONTRACT])))).scalar() or 0
+            
+            inc = (await session.execute(select(func.coalesce(func.sum(Finance.amount), 0)).where(Finance.type == FinanceType.INCOME, Finance.record_date >= month_start))).scalar() or 0
+            exp = (await session.execute(select(func.coalesce(func.sum(Finance.amount), 0)).where(Finance.type == FinanceType.EXPENSE, Finance.record_date >= month_start))).scalar() or 0
         
-        # Tasks stats
-        tasks_open = await session.execute(
-            select(func.count(Task.id)).where(Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS]))
+        text_msg = (
+            f"📊 <b>Статистика ZBS — {today.strftime('%B %Y')}</b>\n\n"
+            f"📅 <b>Расписание:</b>\n"
+            f"   Запланировано: {ct}\n"
+            f"   Выполнено: {cp} ({round(cp/ct*100) if ct else 0}%)\n"
+            f"   Открытых: {open_tasks}\n\n"
+            f"💼 <b>Сделки:</b>\n"
+            f"   Активных: {ad}\n"
+            f"   В работе на: ${ds:,.0f}\n\n"
+            f"💰 <b>Финансы:</b>\n"
+            f"   Приход: ${inc:,.0f}\n"
+            f"   Расход: ${exp:,.0f}\n"
+            f"   Баланс: ${inc - exp:,.0f}"
         )
-        tasks_done_month = await session.execute(
-            select(func.count(Task.id)).where(
-                Task.status == TaskStatus.DONE,
-                Task.completed_at >= month_start
-            )
-        )
-        
-        # Deals stats
-        active_deals = await session.execute(
-            select(func.count(Deal.id)).where(Deal.status.in_([
-                DealStatus.LEAD, DealStatus.NEGOTIATION, DealStatus.PROPOSAL, 
-                DealStatus.CONTRACT, DealStatus.ACTIVE
-            ]))
-        )
-        deals_sum = await session.execute(
-            select(func.coalesce(func.sum(Deal.amount), 0)).where(Deal.status.in_([
-                DealStatus.ACTIVE, DealStatus.CONTRACT
-            ]))
-        )
-        
-        # Finance this month
-        income = await session.execute(
-            select(func.coalesce(func.sum(Finance.amount), 0)).where(
-                Finance.type == FinanceType.INCOME,
-                Finance.record_date >= month_start
-            )
-        )
-        expense = await session.execute(
-            select(func.coalesce(func.sum(Finance.amount), 0)).where(
-                Finance.type == FinanceType.EXPENSE,
-                Finance.record_date >= month_start
-            )
-        )
-    
-    ct = content_total.scalar() or 0
-    cp = content_published.scalar() or 0
-    to = tasks_open.scalar() or 0
-    td = tasks_done_month.scalar() or 0
-    ad = active_deals.scalar() or 0
-    ds = deals_sum.scalar() or 0
-    inc = income.scalar() or 0
-    exp = expense.scalar() or 0
-    
-    text_msg = (
-        f"📊 <b>Статистика ZBS — {today.strftime('%B %Y')}</b>\n\n"
-        f"📅 <b>Контент:</b>\n"
-        f"   Запланировано: {ct}\n"
-        f"   Опубликовано: {cp} ({round(cp/ct*100) if ct else 0}%)\n\n"
-        f"📋 <b>Задачи:</b>\n"
-        f"   Открытых: {to}\n"
-        f"   Выполнено за месяц: {td}\n\n"
-        f"💼 <b>Сделки:</b>\n"
-        f"   Активных: {ad}\n"
-        f"   В работе на: ${ds:,.0f}\n\n"
-        f"💰 <b>Финансы:</b>\n"
-        f"   Приход: ${inc:,.0f}\n"
-        f"   Расход: ${exp:,.0f}\n"
-        f"   Баланс: ${inc - exp:,.0f}"
-    )
+    except Exception as e:
+        text_msg = f"❌ Ошибка:\n<code>{str(e)[:200]}</code>"
     
     await callback.message.edit_text(text_msg, reply_markup=back_to_menu_kb(), parse_mode="HTML")
     await callback.answer()
