@@ -88,7 +88,7 @@ async def cmd_start(message: Message, state: FSMContext):
         f"📊 Отчёт дня — сводка по всему\n\n"
         f"Выбери раздел:"
     )
-    await message.answer(welcome, reply_markup=main_menu_kb(user.role))
+    await message.answer(welcome, reply_markup=main_menu_kb(user.role), parse_mode="HTML")
 
 
 # ==================== Main Menu ====================
