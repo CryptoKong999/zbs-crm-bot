@@ -15,12 +15,12 @@ from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 
 from database import (
-    async_session, ContentPlan, ContentType, ContentStatus,
+    async_session, ContentPlan, ContentAssignee, ContentType, ContentStatus,
     Platform, Project, User, UserRole
 )
 from keyboards import (
     content_menu_kb, content_status_kb,
-    project_select_kb, user_select_kb, back_to_menu_kb, skip_kb
+    project_select_kb, back_to_menu_kb, skip_kb
 )
 
 router = Router()
@@ -39,8 +39,12 @@ def format_item(c, show_assignee: bool = True) -> str:
     time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
     
     assignee_str = ""
-    if show_assignee and c.assignee:
-        assignee_str = f" → {c.assignee.full_name}"
+    if show_assignee:
+        names = [u.full_name for u in c.assignees] if c.assignees else []
+        if not names and c.assignee:
+            names = [c.assignee.full_name]
+        if names:
+            assignee_str = f" → {', '.join(names)}"
     
     project_str = ""
     if c.project:
@@ -239,15 +243,19 @@ async def sched_my(event, state: FSMContext = None):
         result = await session.execute(
             select(ContentPlan)
             .options(selectinload(ContentPlan.project))
+            .join(ContentAssignee, ContentAssignee.content_id == ContentPlan.id, isouter=True)
             .where(and_(
-                ContentPlan.assignee_id == user.id,
+                or_(
+                    ContentAssignee.user_id == user.id,
+                    ContentPlan.assignee_id == user.id,  # legacy compat
+                ),
                 ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS, ContentStatus.REVIEW]),
                 ContentPlan.scheduled_date >= date.today()
             ))
             .order_by(ContentPlan.scheduled_date, ContentPlan.scheduled_time.asc().nulls_last())
             .limit(20)
         )
-        items = result.scalars().all()
+        items = list(dict.fromkeys(result.scalars().all()))  # deduplicate
     
     if not items:
         text = "📋 <b>Мои задачи</b>\n\n✨ Нет активных задач"
@@ -296,21 +304,62 @@ async def sched_add_start(event, state: FSMContext):
 
 @router.message(AddSchedule.title)
 async def sched_add_title(message: Message, state: FSMContext):
-    await state.update_data(title=message.text)
+    await state.update_data(title=message.text, selected_users=[])
     await state.set_state(AddSchedule.assignee)
+    await _show_user_picker(message, state, is_callback=False)
+
+
+async def _show_user_picker(target, state: FSMContext, is_callback: bool = True):
+    """Show multi-select user picker"""
+    data = await state.get_data()
+    selected = data.get("selected_users", [])
     
     async with async_session() as session:
         result = await session.execute(select(User).where(User.is_active == True).order_by(User.full_name))
         users = result.scalars().all()
     
-    await message.answer("👤 Ответственный:", reply_markup=user_select_kb(users, "sassign"))
+    builder = InlineKeyboardBuilder()
+    for u in users:
+        check = "✅ " if u.id in selected else ""
+        label = f"{check}{u.full_name}"
+        if u.username:
+            label += f" (@{u.username})"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"stoggle:{u.id}"))
+    builder.row(InlineKeyboardButton(text="✔️ Готово", callback_data="sassign:done"))
+    builder.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data="sassign:skip"))
+    
+    count = len(selected)
+    text = f"👤 Ответственные ({count} выбрано):\nНажми на имя чтобы выбрать/убрать"
+    
+    if is_callback:
+        await target.message.edit_text(text, reply_markup=builder.as_markup())
+    else:
+        await target.answer(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("stoggle:"), AddSchedule.assignee)
+async def sched_toggle_user(callback: CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = data.get("selected_users", [])
+    
+    if user_id in selected:
+        selected.remove(user_id)
+    else:
+        selected.append(user_id)
+    
+    await state.update_data(selected_users=selected)
+    await _show_user_picker(callback, state)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("sassign:"), AddSchedule.assignee)
 async def sched_add_assignee(callback: CallbackQuery, state: FSMContext):
     val = callback.data.split(":")[1]
-    assignee_id = None if val == "skip" else int(val)
-    await state.update_data(assignee_id=assignee_id)
+    if val == "skip":
+        await state.update_data(selected_users=[])
+    # "done" keeps current selection
+    
     await state.set_state(AddSchedule.project)
     
     async with async_session() as session:
@@ -398,8 +447,9 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
         h, m = map(int, data["scheduled_time"].split(":"))
         scheduled_time = dt_time(h, m)
     
-    # Get creator user id
-    creator_id = None
+    selected_users = data.get("selected_users", [])
+    first_assignee = selected_users[0] if selected_users else None
+    
     async with async_session() as session:
         result = await session.execute(select(User.id).where(User.telegram_id == tg_id))
         creator_id = result.scalar_one_or_none()
@@ -409,7 +459,7 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
             content_type=ContentType.POST,
             platform=Platform.TELEGRAM,
             project_id=data.get("project_id"),
-            assignee_id=data.get("assignee_id"),
+            assignee_id=first_assignee,  # legacy compat
             scheduled_date=date.fromisoformat(data["scheduled_date"]),
             scheduled_time=scheduled_time,
             description=data.get("description"),
@@ -417,28 +467,39 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
             created_by_user_id=creator_id,
         )
         session.add(item)
-        await session.commit()
-        await session.refresh(item)
+        await session.flush()
         
+        # Save all assignees
+        for uid in selected_users:
+            session.add(ContentAssignee(content_id=item.id, user_id=uid))
+        await session.commit()
+        
+        # Reload with relations
         result = await session.execute(
             select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+            .options(selectinload(ContentPlan.project))
             .where(ContentPlan.id == item.id)
         )
         item = result.scalar_one()
+        
+        # Get assignee users for notification
+        assignee_users = []
+        if selected_users:
+            r = await session.execute(select(User).where(User.id.in_(selected_users)))
+            assignee_users = r.scalars().all()
     
     text = f"✅ <b>Задача добавлена!</b>\n\n{format_item(item)}\n📅 {item.scheduled_date.strftime('%d.%m.%Y')}"
     
-    # Notify assignee instantly
-    if item.assignee and item.assignee.telegram_id and item.assignee.telegram_id != 0:
-        creator_id = callback.from_user.id if callback else message.from_user.id
-        if item.assignee.telegram_id != creator_id:  # don't notify yourself
-            weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-            day_name = weekdays[item.scheduled_date.weekday()]
-            time_str = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else ""
-            project_str = f"\n📁 {item.project.emoji} {item.project.name}" if item.project else ""
-            desc_str = f"\n📎 {item.description}" if item.description else ""
-            
+    # Notify all assignees
+    bot_instance = message.bot if not callback else callback.message.bot
+    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    day_name = weekdays[item.scheduled_date.weekday()]
+    time_str = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else ""
+    project_str = f"\n📁 {item.project.emoji} {item.project.name}" if item.project else ""
+    desc_str = f"\n📎 {item.description}" if item.description else ""
+    
+    for u in assignee_users:
+        if u.telegram_id and u.telegram_id != 0 and u.telegram_id != tg_id:
             notify_text = (
                 f"📌 <b>Новая задача для тебя:</b>\n\n"
                 f"<b>{item.title}</b>\n"
@@ -451,10 +512,9 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
                 InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{item.id}"),
             )
             try:
-                bot = message.bot if not callback else callback.message.bot
-                await bot.send_message(item.assignee.telegram_id, notify_text, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
+                await bot_instance.send_message(u.telegram_id, notify_text, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
             except Exception as e:
-                print(f"Failed to notify assignee: {e}")
+                print(f"Failed to notify {u.full_name}: {e}")
     
     target = callback.message if callback else message
     if callback:
@@ -473,7 +533,7 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
     async with async_session() as session:
         result = await session.execute(
             select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project), selectinload(ContentPlan.assignees))
             .where(ContentPlan.id == content_id)
         )
         c = result.scalar_one_or_none()
@@ -487,17 +547,24 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
         return
     
     is_admin = current_user and current_user.role in (UserRole.ADMIN, UserRole.MANAGER)
-    is_assignee = current_user and c.assignee_id == current_user.id
+    assignee_ids = [u.id for u in c.assignees] if c.assignees else ([c.assignee_id] if c.assignee_id else [])
+    is_assignee = current_user and current_user.id in assignee_ids
     
     time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else "не указано"
     weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     day_name = weekdays[c.scheduled_date.weekday()]
     
+    # Build assignee names
+    names = [u.full_name for u in c.assignees] if c.assignees else []
+    if not names and c.assignee:
+        names = [c.assignee.full_name]
+    assignee_display = ", ".join(names) if names else "не назначен"
+    
     text = (
         f"📄 <b>{c.title}</b>\n\n"
         f"📅 {day_name} {c.scheduled_date.strftime('%d.%m.%Y')} в {time_str}\n"
         f"📊 {STATUS_EMOJI.get(c.status, '⬜')} {c.status.value}\n"
-        f"👤 {c.assignee.full_name if c.assignee else 'не назначен'}\n"
+        f"👤 {assignee_display}\n"
     )
     if c.project:
         text += f"📁 {c.project.emoji} {c.project.name}\n"
@@ -785,61 +852,114 @@ async def sed_time_save(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("sed_assign:"))
 async def sed_assign(callback: CallbackQuery, state: FSMContext):
     content_id = int(callback.data.split(":")[1])
-    await state.update_data(edit_id=content_id)
+    
+    # Load current assignees
+    async with async_session() as session:
+        result = await session.execute(
+            select(ContentPlan).options(selectinload(ContentPlan.assignees)).where(ContentPlan.id == content_id)
+        )
+        c = result.scalar_one_or_none()
+        current_ids = [u.id for u in c.assignees] if c and c.assignees else ([c.assignee_id] if c and c.assignee_id else [])
+    
+    await state.update_data(edit_id=content_id, edit_selected=current_ids)
     await state.set_state(EditSchedule.assignee)
+    await _show_edit_user_picker(callback, state)
+    await callback.answer()
+
+
+async def _show_edit_user_picker(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("edit_selected", [])
+    cid = data["edit_id"]
     
     async with async_session() as session:
         result = await session.execute(select(User).where(User.is_active == True).order_by(User.full_name))
         users = result.scalars().all()
     
-    await callback.message.edit_text("👤 Новый ответственный:", reply_markup=user_select_kb(users, "snassign"))
+    builder = InlineKeyboardBuilder()
+    for u in users:
+        check = "✅ " if u.id in selected else ""
+        label = f"{check}{u.full_name}"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"etoggle:{u.id}"))
+    builder.row(InlineKeyboardButton(text="✔️ Сохранить", callback_data="snassign:done"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"sedit:{cid}"))
+    
+    count = len(selected)
+    await callback.message.edit_text(f"👤 Ответственные ({count}):", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("etoggle:"), EditSchedule.assignee)
+async def sed_toggle_user(callback: CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = data.get("edit_selected", [])
+    
+    if user_id in selected:
+        selected.remove(user_id)
+    else:
+        selected.append(user_id)
+    
+    await state.update_data(edit_selected=selected)
+    await _show_edit_user_picker(callback, state)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("snassign:"), EditSchedule.assignee)
 async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
-    val = callback.data.split(":")[1]
-    assignee_id = None if val == "skip" else int(val)
     data = await state.get_data()
     cid = data["edit_id"]
+    selected = data.get("edit_selected", [])
     await state.clear()
     
     async with async_session() as session:
         result = await session.execute(
-            select(ContentPlan)
-            .options(selectinload(ContentPlan.project))
-            .where(ContentPlan.id == cid)
+            select(ContentPlan).options(selectinload(ContentPlan.project)).where(ContentPlan.id == cid)
         )
         c = result.scalar_one_or_none()
         if c:
-            c.assignee_id = assignee_id
+            # Update legacy field
+            c.assignee_id = selected[0] if selected else None
+            
+            # Clear old assignees
+            await session.execute(
+                select(ContentAssignee).where(ContentAssignee.content_id == cid)
+            )
+            from sqlalchemy import delete
+            await session.execute(delete(ContentAssignee).where(ContentAssignee.content_id == cid))
+            
+            # Add new assignees
+            for uid in selected:
+                session.add(ContentAssignee(content_id=cid, user_id=uid))
+            
             await session.commit()
             
-            # Notify new assignee
-            if assignee_id:
-                user_r = await session.execute(select(User).where(User.id == assignee_id))
-                new_assignee = user_r.scalar_one_or_none()
-                if new_assignee and new_assignee.telegram_id and new_assignee.telegram_id != 0 and new_assignee.telegram_id != callback.from_user.id:
-                    weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-                    day_name = weekdays[c.scheduled_date.weekday()]
-                    time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
-                    notify = (
-                        f"📌 <b>Тебе назначена задача:</b>\n\n"
-                        f"<b>{c.title}</b>\n"
-                        f"📅 {day_name} {c.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
-                    )
-                    notify_kb = InlineKeyboardBuilder()
-                    notify_kb.row(
-                        InlineKeyboardButton(text="✅ Принял", callback_data=f"sst:{cid}:progress"),
-                        InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{cid}"),
-                    )
-                    try:
-                        await callback.message.bot.send_message(new_assignee.telegram_id, notify, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
-                    except Exception:
-                        pass
-            await session.commit()
+            # Notify new assignees
+            if selected:
+                users_r = await session.execute(select(User).where(User.id.in_(selected)))
+                new_assignees = users_r.scalars().all()
+                
+                weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+                day_name = weekdays[c.scheduled_date.weekday()]
+                time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
+                
+                for u in new_assignees:
+                    if u.telegram_id and u.telegram_id != 0 and u.telegram_id != callback.from_user.id:
+                        notify = (
+                            f"📌 <b>Тебе назначена задача:</b>\n\n"
+                            f"<b>{c.title}</b>\n"
+                            f"📅 {day_name} {c.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
+                        )
+                        notify_kb = InlineKeyboardBuilder()
+                        notify_kb.row(
+                            InlineKeyboardButton(text="✅ Принял", callback_data=f"sst:{cid}:progress"),
+                            InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{cid}"),
+                        )
+                        try:
+                            await callback.message.bot.send_message(u.telegram_id, notify, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
+                        except Exception:
+                            pass
     
-    await callback.answer("✅ Ответственный изменён", show_alert=True)
+    await callback.answer("✅ Ответственные обновлены", show_alert=True)
     callback.data = f"sedit:{cid}"
     await sched_edit(callback, state)
 

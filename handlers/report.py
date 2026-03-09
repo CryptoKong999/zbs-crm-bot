@@ -116,21 +116,26 @@ async def daily_report(event, state=None):
 async def _get_items_for_date(target_date):
     async with async_session() as session:
         result = await session.execute(
-            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.assignees))
             .where(and_(
                 ContentPlan.scheduled_date == target_date,
                 ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS]),
-                ContentPlan.assignee_id.isnot(None)
             ))
         )
         return result.scalars().all()
 
 
 def _group_by_user(items):
+    """Group items by assignee telegram_id, supporting multiple assignees per item"""
     by_user = {}
     for c in items:
-        if c.assignee and c.assignee.telegram_id and c.assignee.telegram_id != 0:
-            by_user.setdefault(c.assignee.telegram_id, []).append(c)
+        users = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
+        for u in users:
+            if u and u.telegram_id and u.telegram_id != 0:
+                by_user.setdefault(u.telegram_id, []).append(c)
+    # Deduplicate items per user
+    for tg_id in by_user:
+        by_user[tg_id] = list(dict.fromkeys(by_user[tg_id]))
     return by_user
 
 
@@ -204,32 +209,34 @@ async def send_hourly_reminders(bot: Bot):
     
     async with async_session() as session:
         result = await session.execute(
-            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.assignees))
             .where(and_(
                 ContentPlan.scheduled_date == today,
                 ContentPlan.scheduled_time.isnot(None),
                 ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS]),
-                ContentPlan.assignee_id.isnot(None)
             ))
         )
         items = result.scalars().all()
     
     for c in items:
         if c.scheduled_time and c.scheduled_time.hour == next_h:
-            if c.assignee and c.assignee.telegram_id and c.assignee.telegram_id != 0:
-                from aiogram.utils.keyboard import InlineKeyboardBuilder
-                from aiogram.types import InlineKeyboardButton
-                
-                text = f"🔔 <b>Через час ({c.scheduled_time.strftime('%H:%M')}):</b>\n\n{c.title}"
-                builder = InlineKeyboardBuilder()
-                builder.row(
-                    InlineKeyboardButton(text="✅ В работе", callback_data=f"sst:{c.id}:progress"),
-                    InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{c.id}"),
-                )
-                try:
-                    await bot.send_message(c.assignee.telegram_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
-                except Exception as e:
-                    print(f"Hourly remind failed: {e}")
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            from aiogram.types import InlineKeyboardButton
+            
+            text = f"🔔 <b>Через час ({c.scheduled_time.strftime('%H:%M')}):</b>\n\n{c.title}"
+            builder = InlineKeyboardBuilder()
+            builder.row(
+                InlineKeyboardButton(text="✅ В работе", callback_data=f"sst:{c.id}:progress"),
+                InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{c.id}"),
+            )
+            
+            users = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
+            for u in users:
+                if u and u.telegram_id and u.telegram_id != 0:
+                    try:
+                        await bot.send_message(u.telegram_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+                    except Exception as e:
+                        print(f"Hourly remind failed: {e}")
 
 
 async def send_overdue_alerts(bot: Bot):

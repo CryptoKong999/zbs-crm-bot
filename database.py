@@ -162,6 +162,21 @@ class Deal(Base):
     )
 
 
+class ContentAssignee(Base):
+    """Many-to-many: tasks <-> users"""
+    __tablename__ = "content_assignees"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    content_id = Column(Integer, ForeignKey("content_plan.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    __table_args__ = (
+        UniqueConstraint("content_id", "user_id", name="uq_content_user"),
+        Index("idx_ca_content", "content_id"),
+        Index("idx_ca_user", "user_id"),
+    )
+
+
 class ContentPlan(Base):
     """Контент-календарь"""
     __tablename__ = "content_plan"
@@ -171,8 +186,8 @@ class ContentPlan(Base):
     content_type = Column(Enum(ContentType), nullable=False)
     platform = Column(Enum(Platform), nullable=False)
     project_id = Column(Integer, ForeignKey("projects.id"))
-    deal_id = Column(Integer, ForeignKey("deals.id"))  # если коммерческий контент
-    assignee_id = Column(Integer, ForeignKey("users.id"))
+    deal_id = Column(Integer, ForeignKey("deals.id"))
+    assignee_id = Column(Integer, ForeignKey("users.id"))  # legacy, kept for compat
     created_by_user_id = Column(Integer, ForeignKey("users.id"))
     
     scheduled_date = Column(Date, nullable=False)
@@ -188,6 +203,7 @@ class ContentPlan(Base):
     deal = relationship("Deal", back_populates="content_plans")
     assignee = relationship("User", back_populates="assigned_content", foreign_keys=[assignee_id])
     creator = relationship("User", foreign_keys=[created_by_user_id])
+    assignees = relationship("User", secondary="content_assignees", lazy="selectin")
 
     __table_args__ = (
         Index("idx_content_date", "scheduled_date"),
