@@ -177,6 +177,25 @@ class ContentAssignee(Base):
     )
 
 
+class TaskAttachment(Base):
+    """Photos, voice, files attached to tasks"""
+    __tablename__ = "task_attachments"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    content_id = Column(Integer, ForeignKey("content_plan.id", ondelete="CASCADE"), nullable=False)
+    file_id = Column(String(500), nullable=False)  # Telegram file_id
+    file_type = Column(String(20), nullable=False)  # photo, voice, video, document
+    caption = Column(Text)
+    uploaded_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, server_default=func.now())
+    
+    # Relationships
+    content = relationship("ContentPlan", backref="attachments")
+    uploader = relationship("User", foreign_keys=[uploaded_by])
+        Index("idx_ca_user", "user_id"),
+    )
+
+
 class ContentPlan(Base):
     """Контент-календарь"""
     __tablename__ = "content_plan"

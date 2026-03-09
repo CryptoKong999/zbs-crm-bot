@@ -15,7 +15,7 @@ from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 
 from database import (
-    async_session, ContentPlan, ContentAssignee, ContentType, ContentStatus,
+    async_session, ContentPlan, ContentAssignee, TaskAttachment, ContentType, ContentStatus,
     Platform, Project, User, UserRole
 )
 from keyboards import (
@@ -62,6 +62,7 @@ class AddSchedule(StatesGroup):
     date = State()
     time = State()
     description = State()
+    media = State()
 
 
 class EditSchedule(StatesGroup):
@@ -70,6 +71,7 @@ class EditSchedule(StatesGroup):
     assignee = State()
     title = State()
     description = State()
+    media = State()
 
 
 class Reschedule(StatesGroup):
@@ -428,13 +430,84 @@ async def sched_add_time(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "sdesc:skip", AddSchedule.description)
 async def sched_desc_skip(callback: CallbackQuery, state: FSMContext):
     await state.update_data(description=None)
-    await _save_schedule(callback.message, state, callback)
+    await _ask_media(callback.message, state, is_callback=True)
+    await callback.answer()
 
 
 @router.message(AddSchedule.description)
 async def sched_add_desc(message: Message, state: FSMContext):
     await state.update_data(description=message.text)
-    await _save_schedule(message, state)
+    await _ask_media(message, state, is_callback=False)
+
+
+async def _ask_media(message, state, is_callback=False):
+    await state.update_data(media_files=[])
+    await state.set_state(AddSchedule.media)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="⏭ Без вложений", callback_data="smedia:done"))
+    
+    text = "📷 Прикрепи фото, голосовое или файл\n\nМожно несколько — отправляй по одному.\nКогда закончишь — нажми кнопку."
+    if is_callback:
+        await message.edit_text(text, reply_markup=builder.as_markup())
+    else:
+        await message.answer(text, reply_markup=builder.as_markup())
+
+
+def _media_done_kb(count: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=f"✅ Готово ({count} прикреплено)", callback_data="smedia:done"))
+    return builder.as_markup()
+
+
+@router.message(AddSchedule.media, F.photo)
+async def sched_media_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("media_files", [])
+    files.append({"file_id": message.photo[-1].file_id, "type": "photo"})
+    await state.update_data(media_files=files)
+    await message.answer(f"📷 Фото добавлено ({len(files)} вложений)", reply_markup=_media_done_kb(len(files)))
+
+
+@router.message(AddSchedule.media, F.voice)
+async def sched_media_voice(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("media_files", [])
+    files.append({"file_id": message.voice.file_id, "type": "voice"})
+    await state.update_data(media_files=files)
+    await message.answer(f"🎤 Голосовое добавлено ({len(files)} вложений)", reply_markup=_media_done_kb(len(files)))
+
+
+@router.message(AddSchedule.media, F.video)
+async def sched_media_video(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("media_files", [])
+    files.append({"file_id": message.video.file_id, "type": "video"})
+    await state.update_data(media_files=files)
+    await message.answer(f"🎬 Видео добавлено ({len(files)} вложений)", reply_markup=_media_done_kb(len(files)))
+
+
+@router.message(AddSchedule.media, F.document)
+async def sched_media_doc(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("media_files", [])
+    files.append({"file_id": message.document.file_id, "type": "document"})
+    await state.update_data(media_files=files)
+    await message.answer(f"📄 Файл добавлен ({len(files)} вложений)", reply_markup=_media_done_kb(len(files)))
+
+
+@router.message(AddSchedule.media, F.video_note)
+async def sched_media_videonote(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("media_files", [])
+    files.append({"file_id": message.video_note.file_id, "type": "video_note"})
+    await state.update_data(media_files=files)
+    await message.answer(f"⭕ Кружок добавлен ({len(files)} вложений)", reply_markup=_media_done_kb(len(files)))
+
+
+@router.callback_query(F.data == "smedia:done", AddSchedule.media)
+async def sched_media_done(callback: CallbackQuery, state: FSMContext):
+    await _save_schedule(callback.message, state, callback)
 
 
 async def _save_schedule(message: Message, state: FSMContext, callback: CallbackQuery = None):
@@ -449,6 +522,7 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
     
     selected_users = data.get("selected_users", [])
     first_assignee = selected_users[0] if selected_users else None
+    media_files = data.get("media_files", [])
     
     async with async_session() as session:
         result = await session.execute(select(User.id).where(User.telegram_id == tg_id))
@@ -459,7 +533,7 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
             content_type=ContentType.POST,
             platform=Platform.TELEGRAM,
             project_id=data.get("project_id"),
-            assignee_id=first_assignee,  # legacy compat
+            assignee_id=first_assignee,
             scheduled_date=date.fromisoformat(data["scheduled_date"]),
             scheduled_time=scheduled_time,
             description=data.get("description"),
@@ -469,32 +543,42 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
         session.add(item)
         await session.flush()
         
-        # Save all assignees
+        # Save assignees
         for uid in selected_users:
             session.add(ContentAssignee(content_id=item.id, user_id=uid))
+        
+        # Save attachments
+        for mf in media_files:
+            session.add(TaskAttachment(
+                content_id=item.id,
+                file_id=mf["file_id"],
+                file_type=mf["type"],
+                uploaded_by=creator_id,
+            ))
+        
         await session.commit()
         
-        # Reload with relations
+        # Reload
         result = await session.execute(
-            select(ContentPlan)
-            .options(selectinload(ContentPlan.project))
+            select(ContentPlan).options(selectinload(ContentPlan.project))
             .where(ContentPlan.id == item.id)
         )
         item = result.scalar_one()
         
-        # Get assignee users for notification
         assignee_users = []
         if selected_users:
             r = await session.execute(select(User).where(User.id.in_(selected_users)))
             assignee_users = r.scalars().all()
     
-    text = f"✅ <b>Задача добавлена!</b>\n\n{format_item(item)}\n📅 {item.scheduled_date.strftime('%d.%m.%Y')}"
+    attach_count = len(media_files)
+    attach_str = f"\n📎 {attach_count} вложений" if attach_count else ""
+    text = f"✅ <b>Задача добавлена!</b>\n\n{format_item(item)}\n📅 {item.scheduled_date.strftime('%d.%m.%Y')}{attach_str}"
     
     # Notify all assignees
     bot_instance = message.bot if not callback else callback.message.bot
     weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     day_name = weekdays[item.scheduled_date.weekday()]
-    time_str = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else ""
+    time_str_fmt = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else ""
     project_str = f"\n📁 {item.project.emoji} {item.project.name}" if item.project else ""
     desc_str = f"\n📎 {item.description}" if item.description else ""
     
@@ -503,7 +587,7 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
             notify_text = (
                 f"📌 <b>Новая задача для тебя:</b>\n\n"
                 f"<b>{item.title}</b>\n"
-                f"📅 {day_name} {item.scheduled_date.strftime('%d.%m.%Y')} {time_str}"
+                f"📅 {day_name} {item.scheduled_date.strftime('%d.%m.%Y')} {time_str_fmt}"
                 f"{project_str}{desc_str}"
             )
             notify_kb = InlineKeyboardBuilder()
@@ -513,6 +597,21 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
             )
             try:
                 await bot_instance.send_message(u.telegram_id, notify_text, reply_markup=notify_kb.as_markup(), parse_mode="HTML")
+                # Send attachments
+                for mf in media_files:
+                    try:
+                        if mf["type"] == "photo":
+                            await bot_instance.send_photo(u.telegram_id, mf["file_id"])
+                        elif mf["type"] == "voice":
+                            await bot_instance.send_voice(u.telegram_id, mf["file_id"])
+                        elif mf["type"] == "video":
+                            await bot_instance.send_video(u.telegram_id, mf["file_id"])
+                        elif mf["type"] == "video_note":
+                            await bot_instance.send_video_note(u.telegram_id, mf["file_id"])
+                        elif mf["type"] == "document":
+                            await bot_instance.send_document(u.telegram_id, mf["file_id"])
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Failed to notify {u.full_name}: {e}")
     
@@ -571,6 +670,16 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
     if c.description:
         text += f"\n📎 {c.description}\n"
     
+    # Count attachments
+    async with async_session() as session:
+        from sqlalchemy import func as sqlfunc
+        att_count = (await session.execute(
+            select(sqlfunc.count(TaskAttachment.id)).where(TaskAttachment.content_id == content_id)
+        )).scalar() or 0
+    
+    if att_count:
+        text += f"\n🖼 Вложений: {att_count}\n"
+    
     builder = InlineKeyboardBuilder()
     
     if is_admin:
@@ -589,21 +698,30 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
             InlineKeyboardButton(text="✅ Готово", callback_data=f"sst:{content_id}:published"),
         )
         builder.row(
+            InlineKeyboardButton(text=f"🖼 Вложения ({att_count})", callback_data=f"satt:{content_id}"),
+            InlineKeyboardButton(text="➕ Прикрепить", callback_data=f"satt_add:{content_id}"),
+        )
+        builder.row(
             InlineKeyboardButton(text="❌ Отменить", callback_data=f"sst:{content_id}:cancelled"),
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"sed_del:{content_id}"),
         )
     elif is_assignee:
-        # Assignee: status + reschedule with reason
         text += "\n<b>Действия:</b>"
         builder.row(
             InlineKeyboardButton(text="🔄 В работе", callback_data=f"sst:{content_id}:progress"),
             InlineKeyboardButton(text="✅ Готово", callback_data=f"sst:{content_id}:published"),
         )
         builder.row(
+            InlineKeyboardButton(text=f"🖼 Вложения ({att_count})", callback_data=f"satt:{content_id}"),
+            InlineKeyboardButton(text="➕ Прикрепить", callback_data=f"satt_add:{content_id}"),
+        )
+        builder.row(
             InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{content_id}"),
         )
     else:
         text += "\n<i>Только просмотр</i>"
+        if att_count:
+            builder.row(InlineKeyboardButton(text=f"🖼 Вложения ({att_count})", callback_data=f"satt:{content_id}"))
     
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="sched:today"))
     
@@ -1017,6 +1135,153 @@ async def sed_delete_confirm(callback: CallbackQuery):
     
     await callback.answer("🗑 Удалено", show_alert=True)
     await callback.message.edit_text("🗑 Задача удалена", reply_markup=schedule_menu_kb())
+
+
+# ==================== Attachments ====================
+
+@router.callback_query(F.data.startswith("satt:"))
+async def satt_view(callback: CallbackQuery):
+    """View all attachments for a task"""
+    content_id = int(callback.data.split(":")[1])
+    
+    async with async_session() as session:
+        result = await session.execute(
+            select(TaskAttachment)
+            .options(selectinload(TaskAttachment.uploader))
+            .where(TaskAttachment.content_id == content_id)
+            .order_by(TaskAttachment.created_at)
+        )
+        attachments = result.scalars().all()
+    
+    if not attachments:
+        await callback.answer("Нет вложений", show_alert=True)
+        return
+    
+    # Send all attachments
+    type_emoji = {"photo": "📷", "voice": "🎤", "video": "🎬", "video_note": "⭕", "document": "📄"}
+    bot = callback.message.bot
+    
+    for att in attachments:
+        try:
+            who = att.uploader.full_name if att.uploader else ""
+            caption = f"{type_emoji.get(att.file_type, '📎')} {who}" if who else None
+            
+            if att.file_type == "photo":
+                await bot.send_photo(callback.from_user.id, att.file_id, caption=caption)
+            elif att.file_type == "voice":
+                await bot.send_voice(callback.from_user.id, att.file_id, caption=caption)
+            elif att.file_type == "video":
+                await bot.send_video(callback.from_user.id, att.file_id, caption=caption)
+            elif att.file_type == "video_note":
+                await bot.send_video_note(callback.from_user.id, att.file_id)
+            elif att.file_type == "document":
+                await bot.send_document(callback.from_user.id, att.file_id, caption=caption)
+        except Exception as e:
+            print(f"Failed to send attachment: {e}")
+    
+    await callback.answer(f"📎 Отправлено {len(attachments)} вложений")
+
+
+@router.callback_query(F.data.startswith("satt_add:"))
+async def satt_add_start(callback: CallbackQuery, state: FSMContext):
+    """Start adding attachment to existing task"""
+    content_id = int(callback.data.split(":")[1])
+    await state.update_data(att_content_id=content_id, att_files=[])
+    await state.set_state(EditSchedule.media)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✅ Готово", callback_data="satt_save"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"sedit:{content_id}"))
+    
+    await callback.message.edit_text(
+        "📷 Отправь фото, голосовое или файл\n\nМожно несколько — по одному. Потом нажми Готово.",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+def _att_save_kb(count: int, content_id: int):
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=f"✅ Сохранить ({count})", callback_data="satt_save"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"sedit:{content_id}"))
+    return builder.as_markup()
+
+
+@router.message(EditSchedule.media, F.photo)
+async def satt_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("att_files", [])
+    files.append({"file_id": message.photo[-1].file_id, "type": "photo"})
+    await state.update_data(att_files=files)
+    await message.answer(f"📷 Добавлено ({len(files)})", reply_markup=_att_save_kb(len(files), data["att_content_id"]))
+
+
+@router.message(EditSchedule.media, F.voice)
+async def satt_voice(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("att_files", [])
+    files.append({"file_id": message.voice.file_id, "type": "voice"})
+    await state.update_data(att_files=files)
+    await message.answer(f"🎤 Добавлено ({len(files)})", reply_markup=_att_save_kb(len(files), data["att_content_id"]))
+
+
+@router.message(EditSchedule.media, F.video)
+async def satt_video(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("att_files", [])
+    files.append({"file_id": message.video.file_id, "type": "video"})
+    await state.update_data(att_files=files)
+    await message.answer(f"🎬 Добавлено ({len(files)})", reply_markup=_att_save_kb(len(files), data["att_content_id"]))
+
+
+@router.message(EditSchedule.media, F.document)
+async def satt_doc(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("att_files", [])
+    files.append({"file_id": message.document.file_id, "type": "document"})
+    await state.update_data(att_files=files)
+    await message.answer(f"📄 Добавлено ({len(files)})", reply_markup=_att_save_kb(len(files), data["att_content_id"]))
+
+
+@router.message(EditSchedule.media, F.video_note)
+async def satt_videonote(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = data.get("att_files", [])
+    files.append({"file_id": message.video_note.file_id, "type": "video_note"})
+    await state.update_data(att_files=files)
+    await message.answer(f"⭕ Добавлено ({len(files)})", reply_markup=_att_save_kb(len(files), data["att_content_id"]))
+
+
+@router.callback_query(F.data == "satt_save", EditSchedule.media)
+async def satt_save(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    content_id = data["att_content_id"]
+    files = data.get("att_files", [])
+    await state.clear()
+    
+    if not files:
+        await callback.answer("Ничего не прикреплено", show_alert=True)
+        callback.data = f"sedit:{content_id}"
+        await sched_edit(callback)
+        return
+    
+    # Get uploader
+    async with async_session() as session:
+        user_r = await session.execute(select(User.id).where(User.telegram_id == callback.from_user.id))
+        uploader_id = user_r.scalar_one_or_none()
+        
+        for mf in files:
+            session.add(TaskAttachment(
+                content_id=content_id,
+                file_id=mf["file_id"],
+                file_type=mf["type"],
+                uploaded_by=uploader_id,
+            ))
+        await session.commit()
+    
+    await callback.answer(f"✅ {len(files)} вложений сохранено", show_alert=True)
+    callback.data = f"sedit:{content_id}"
+    await sched_edit(callback)
 
 
 # ==================== Cancel ====================
