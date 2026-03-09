@@ -173,6 +173,7 @@ class ContentPlan(Base):
     project_id = Column(Integer, ForeignKey("projects.id"))
     deal_id = Column(Integer, ForeignKey("deals.id"))  # если коммерческий контент
     assignee_id = Column(Integer, ForeignKey("users.id"))
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
     
     scheduled_date = Column(Date, nullable=False)
     scheduled_time = Column(Time)
@@ -186,6 +187,7 @@ class ContentPlan(Base):
     project = relationship("Project", back_populates="content_plans")
     deal = relationship("Deal", back_populates="content_plans")
     assignee = relationship("User", back_populates="assigned_content", foreign_keys=[assignee_id])
+    creator = relationship("User", foreign_keys=[created_by_user_id])
 
     __table_args__ = (
         Index("idx_content_date", "scheduled_date"),

@@ -390,6 +390,7 @@ async def sched_add_desc(message: Message, state: FSMContext):
 
 async def _save_schedule(message: Message, state: FSMContext, callback: CallbackQuery = None):
     data = await state.get_data()
+    tg_id = callback.from_user.id if callback else message.from_user.id
     await state.clear()
     
     scheduled_time = None
@@ -397,17 +398,23 @@ async def _save_schedule(message: Message, state: FSMContext, callback: Callback
         h, m = map(int, data["scheduled_time"].split(":"))
         scheduled_time = dt_time(h, m)
     
+    # Get creator user id
+    creator_id = None
     async with async_session() as session:
+        result = await session.execute(select(User.id).where(User.telegram_id == tg_id))
+        creator_id = result.scalar_one_or_none()
+        
         item = ContentPlan(
             title=data["title"],
-            content_type=ContentType.POST,  # default, doesn't matter
-            platform=Platform.TELEGRAM,      # default, doesn't matter
+            content_type=ContentType.POST,
+            platform=Platform.TELEGRAM,
             project_id=data.get("project_id"),
             assignee_id=data.get("assignee_id"),
             scheduled_date=date.fromisoformat(data["scheduled_date"]),
             scheduled_time=scheduled_time,
             description=data.get("description"),
             status=ContentStatus.PLANNED,
+            created_by_user_id=creator_id,
         )
         session.add(item)
         await session.commit()
@@ -532,7 +539,7 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
     await callback.answer()
 
 
-# --- Quick Status Change (notifies admins) ---
+# --- Quick Status Change (notifies task creator) ---
 
 @router.callback_query(F.data.startswith("sst:"))
 async def sched_status(callback: CallbackQuery):
@@ -543,7 +550,7 @@ async def sched_status(callback: CallbackQuery):
     async with async_session() as session:
         result = await session.execute(
             select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee))
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator))
             .where(ContentPlan.id == content_id)
         )
         c = result.scalar_one_or_none()
@@ -551,22 +558,19 @@ async def sched_status(callback: CallbackQuery):
             c.status = new_status
             await session.commit()
             
-            # Notify admins if assignee changed status
-            if c.assignee and c.assignee.telegram_id == callback.from_user.id:
-                import os
-                admin_ids = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+            # Notify task creator (not yourself)
+            if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
                 status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
+                who = c.assignee.full_name if c.assignee else "Кто-то"
                 notify = (
-                    f"📋 <b>{c.assignee.full_name}</b> обновил задачу:\n\n"
+                    f"📋 <b>{who}</b> обновил задачу:\n\n"
                     f"<b>{c.title}</b>\n"
                     f"Статус: {status_text}"
                 )
-                for aid in admin_ids:
-                    if aid != callback.from_user.id:
-                        try:
-                            await callback.message.bot.send_message(aid, notify, parse_mode="HTML")
-                        except Exception:
-                            pass
+                try:
+                    await callback.message.bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
+                except Exception:
+                    pass
     
     await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Готово!", show_alert=True)
     callback.data = f"sedit:{content_id}"
@@ -637,7 +641,7 @@ async def resched_reason(message: Message, state: FSMContext):
     async with async_session() as session:
         result = await session.execute(
             select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project), selectinload(ContentPlan.creator))
             .where(ContentPlan.id == content_id)
         )
         c = result.scalar_one_or_none()
@@ -666,10 +670,7 @@ async def resched_reason(message: Message, state: FSMContext):
         
         await session.commit()
         
-        # Notify admins
-        import os
-        admin_ids = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-        
+        # Notify task creator (not yourself)
         weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
         new_day = weekdays[new_date.weekday()]
         
@@ -682,12 +683,11 @@ async def resched_reason(message: Message, state: FSMContext):
             f"💬 Причина: <i>{reason}</i>"
         )
         
-        for aid in admin_ids:
-            if aid != message.from_user.id:
-                try:
-                    await message.bot.send_message(aid, notify, parse_mode="HTML")
-                except Exception:
-                    pass
+        if c.creator and c.creator.telegram_id and c.creator.telegram_id != message.from_user.id:
+            try:
+                await message.bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
+            except Exception:
+                pass
     
     await message.answer(
         f"✅ Задача перенесена на {new_date.strftime('%d.%m')} {new_time}\n\n💬 {reason}",
