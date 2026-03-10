@@ -740,7 +740,7 @@ async def sched_status(callback: CallbackQuery):
     async with async_session() as session:
         result = await session.execute(
             select(ContentPlan)
-            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator))
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.creator), selectinload(ContentPlan.assignees))
             .where(ContentPlan.id == content_id)
         )
         c = result.scalar_one_or_none()
@@ -748,19 +748,50 @@ async def sched_status(callback: CallbackQuery):
             c.status = new_status
             await session.commit()
             
-            # Notify task creator (not yourself)
-            if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
-                status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
-                who = c.assignee.full_name if c.assignee else "Кто-то"
-                notify = (
-                    f"📋 <b>{who}</b> обновил задачу:\n\n"
+            bot = callback.message.bot
+            who = callback.from_user.full_name
+            status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
+            
+            if new_status == ContentStatus.PUBLISHED:
+                # Task completed — notify creator
+                menu_kb = InlineKeyboardBuilder()
+                menu_kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
+                
+                done_text = (
+                    f"✅ <b>Задача выполнена!</b>\n\n"
                     f"<b>{c.title}</b>\n"
-                    f"Статус: {status_text}"
+                    f"👤 {who}\n\n"
+                    f"Задача закрыта."
                 )
-                try:
-                    await callback.message.bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
-                except Exception:
-                    pass
+                
+                # Notify creator
+                if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
+                    try:
+                        await bot.send_message(c.creator.telegram_id, done_text, reply_markup=menu_kb.as_markup(), parse_mode="HTML")
+                    except Exception:
+                        pass
+                
+                # Notify all assignees (except the one who completed)
+                users_to_notify = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
+                for u in users_to_notify:
+                    if u and u.telegram_id and u.telegram_id != 0 and u.telegram_id != callback.from_user.id:
+                        if not (c.creator and u.telegram_id == c.creator.telegram_id):  # don't double-notify creator
+                            try:
+                                await bot.send_message(u.telegram_id, done_text, reply_markup=menu_kb.as_markup(), parse_mode="HTML")
+                            except Exception:
+                                pass
+            else:
+                # Other status — notify creator only
+                if c.creator and c.creator.telegram_id and c.creator.telegram_id != callback.from_user.id:
+                    notify = (
+                        f"📋 <b>{who}</b> обновил задачу:\n\n"
+                        f"<b>{c.title}</b>\n"
+                        f"Статус: {status_text}"
+                    )
+                    try:
+                        await bot.send_message(c.creator.telegram_id, notify, parse_mode="HTML")
+                    except Exception:
+                        pass
     
     await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Готово!", show_alert=True)
     callback.data = f"sedit:{content_id}"

@@ -80,15 +80,9 @@ async def cmd_start(message: Message, state: FSMContext):
         f"👋 Привет, {user.full_name}!\n\n"
         f"Это CRM-бот ZBS Media.\n"
         f"Роль: {role_text.get(user.role, '👤 Участник')}\n\n"
-        f"Тебе доступно:\n"
-        f"📅 Контент — календарь, кто что снимает\n"
-        f"📋 Задачи — твои задания и дедлайны\n"
-        f"👥 Клиенты — сделки и pipeline\n"
-        f"💰 Финансы — приход/расход\n"
-        f"📊 Отчёт дня — сводка по всему\n\n"
         f"Выбери раздел:"
     )
-    await message.answer(welcome, reply_markup=main_menu_kb(user.role), parse_mode="HTML")
+    await message.answer(welcome, reply_markup=main_menu_kb(user.role, user.username or ""), parse_mode="HTML")
 
 
 # ==================== Main Menu ====================
@@ -103,7 +97,7 @@ async def menu_main(callback: CallbackQuery, state: FSMContext):
     )
     await callback.message.edit_text(
         "🏠 Главное меню ZBS CRM\n\nВыбери раздел:",
-        reply_markup=main_menu_kb(user.role)
+        reply_markup=main_menu_kb(user.role, user.username or "")
     )
     await callback.answer()
 
@@ -118,7 +112,7 @@ async def cmd_menu(message: Message, state: FSMContext):
         username=message.from_user.username,
         full_name=message.from_user.full_name,
     )
-    await message.answer("🏠 Главное меню:", reply_markup=main_menu_kb(user.role))
+    await message.answer("🏠 Главное меню:", reply_markup=main_menu_kb(user.role, user.username or ""))
 
 
 # ==================== /help ====================
