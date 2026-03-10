@@ -793,9 +793,20 @@ async def sched_status(callback: CallbackQuery):
                     except Exception:
                         pass
     
-    await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Готово!", show_alert=True)
-    callback.data = f"sedit:{content_id}"
-    await sched_edit(callback)
+    if new_status == ContentStatus.PUBLISHED:
+        # Show completion message to the person who completed it
+        menu_kb_self = InlineKeyboardBuilder()
+        menu_kb_self.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
+        await callback.message.edit_text(
+            f"✅ <b>Задача выполнена!</b>\n\n<b>{c.title if c else ''}</b>\n\nОтличная работа!",
+            reply_markup=menu_kb_self.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+    else:
+        await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Обновлено!", show_alert=True)
+        callback.data = f"sedit:{content_id}"
+        await sched_edit(callback)
 
 
 # --- Reschedule (assignee picks date + time + writes reason, admins notified) ---
