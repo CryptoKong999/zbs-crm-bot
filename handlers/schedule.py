@@ -237,7 +237,7 @@ async def sched_my(event, state: FSMContext = None):
         if not user:
             text = "❌ Напиши /start"
             if isinstance(event, CallbackQuery):
-                await event.answer(text, show_alert=True)
+                await event.answer(text)
             else:
                 await event.answer(text)
             return
@@ -642,7 +642,7 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
         current_user = user_r.scalar_one_or_none()
     
     if not c:
-        await callback.answer("Не найдено", show_alert=True)
+        await callback.answer("Не найдено")
         return
     
     is_admin = current_user and current_user.role in (UserRole.ADMIN, UserRole.MANAGER)
@@ -804,7 +804,7 @@ async def sched_status(callback: CallbackQuery):
         )
         await callback.answer()
     else:
-        await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Обновлено!", show_alert=True)
+        await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Обновлено!")
         callback.data = f"sedit:{content_id}"
         await sched_edit(callback)
 
@@ -962,7 +962,7 @@ async def sed_date_save(callback: CallbackQuery, state: FSMContext):
             c.scheduled_date = date.fromisoformat(date_str)
             await session.commit()
     
-    await callback.answer(f"✅ Перенесено на {date_str}", show_alert=True)
+    await callback.answer(f"✅ Перенесено на {date_str}")
     callback.data = f"sedit:{cid}"
     await sched_edit(callback, state)
 
@@ -1002,7 +1002,7 @@ async def sed_time_save(callback: CallbackQuery, state: FSMContext):
             c.scheduled_time = dt_time(h, m)
             await session.commit()
     
-    await callback.answer(f"✅ Время: {time_str}", show_alert=True)
+    await callback.answer(f"✅ Время: {time_str}")
     callback.data = f"sedit:{cid}"
     await sched_edit(callback, state)
 
@@ -1119,7 +1119,7 @@ async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
                         except Exception:
                             pass
     
-    await callback.answer("✅ Ответственные обновлены", show_alert=True)
+    await callback.answer("✅ Ответственные обновлены")
     callback.data = f"sedit:{cid}"
     await sched_edit(callback, state)
 
@@ -1175,7 +1175,7 @@ async def sed_delete_confirm(callback: CallbackQuery):
             await session.delete(c)
             await session.commit()
     
-    await callback.answer("🗑 Удалено", show_alert=True)
+    await callback.answer("🗑 Удалено")
     await callback.message.edit_text("🗑 Задача удалена", reply_markup=schedule_menu_kb())
 
 
@@ -1196,7 +1196,7 @@ async def satt_view(callback: CallbackQuery):
         attachments = result.scalars().all()
     
     if not attachments:
-        await callback.answer("Нет вложений", show_alert=True)
+        await callback.answer("Нет вложений")
         return
     
     # Send all attachments
@@ -1302,7 +1302,7 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     if not files:
-        await callback.answer("Ничего не прикреплено", show_alert=True)
+        await callback.answer("Ничего не прикреплено")
         callback.data = f"sedit:{content_id}"
         await sched_edit(callback)
         return
@@ -1321,7 +1321,7 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
             ))
         await session.commit()
     
-    await callback.answer(f"✅ {len(files)} вложений сохранено", show_alert=True)
+    await callback.answer(f"✅ {len(files)} вложений сохранено")
     callback.data = f"sedit:{content_id}"
     await sched_edit(callback)
 

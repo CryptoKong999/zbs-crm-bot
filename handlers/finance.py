@@ -27,7 +27,7 @@ FINANCE_ACCESS = {"nasyrov_robert", "madvadps", "sarikyusupov", "n_syuzi"}
 async def check_finance_access(callback: CallbackQuery) -> bool:
     username = (callback.from_user.username or "").lower()
     if username not in FINANCE_ACCESS:
-        await callback.answer("⛔ Нет доступа к финансам", show_alert=True)
+        await callback.answer("⛔ Нет доступа к финансам")
         return False
     return True
 
