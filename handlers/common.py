@@ -142,7 +142,8 @@ async def menu_admin(callback: CallbackQuery):
         full_name=callback.from_user.full_name,
     )
     if user.role not in (UserRole.ADMIN, UserRole.MANAGER):
-        await callback.answer("⛔ Нет доступа")
+        await callback.message.edit_text("⛔ Нет доступа", reply_markup=back_to_menu_kb())
+        await callback.answer()
         return
     
     await callback.message.edit_text(
@@ -252,7 +253,7 @@ async def admin_project_emoji(callback: CallbackQuery, state: FSMContext):
         session.add(project)
         await session.commit()
     
-    await callback.answer(f"✅ Проект {emoji} {data['name']} создан!")
+    await callback.answer()
     await admin_projects(callback)
 
 @router.callback_query(F.data == "admin:stats")

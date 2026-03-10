@@ -142,7 +142,7 @@ async def client_view(callback: CallbackQuery):
         )
         c = result.scalar_one_or_none()
         if not c:
-            await callback.answer("Клиент не найден")
+            await callback.answer("Клиент не найден", show_alert=False)
             return
         
         # Get deals
@@ -391,7 +391,7 @@ async def deal_view(callback: CallbackQuery):
         d = result.scalar_one_or_none()
     
     if not d:
-        await callback.answer("Сделка не найдена")
+        await callback.answer("Сделка не найдена", show_alert=False)
         return
     
     lines = [
@@ -433,7 +433,7 @@ async def deal_change_status(callback: CallbackQuery):
     
     emoji = DEAL_STATUS_EMOJI.get(new_status, "")
     name = DEAL_STATUS_NAME.get(new_status, "")
-    await callback.answer(f"Статус: {emoji} {name}")
+    await callback.answer()
     await deal_view(callback)
 
 
@@ -450,7 +450,7 @@ async def deal_add_start(callback: CallbackQuery, state: FSMContext):
         clients = result.scalars().all()
     
     if not clients:
-        await callback.answer("Сначала добавь клиента!")
+        await callback.message.edit_text("👥 Сначала добавь клиента!", reply_markup=clients_menu_kb(), parse_mode="HTML"); await callback.answer()
         return
     
     await state.set_state(AddDeal.client)

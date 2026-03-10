@@ -642,7 +642,7 @@ async def sched_edit(callback: CallbackQuery, state: FSMContext = None):
         current_user = user_r.scalar_one_or_none()
     
     if not c:
-        await callback.answer("Не найдено")
+        await callback.answer()
         return
     
     is_admin = current_user and current_user.role in (UserRole.ADMIN, UserRole.MANAGER)
@@ -804,9 +804,15 @@ async def sched_status(callback: CallbackQuery):
         )
         await callback.answer()
     else:
-        await callback.answer(f"{STATUS_EMOJI.get(new_status, '')} Обновлено!")
-        callback.data = f"sedit:{content_id}"
-        await sched_edit(callback)
+        status_label = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
+        menu_kb_s = InlineKeyboardBuilder()
+        menu_kb_s.row(InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"))
+        await callback.message.edit_text(
+            f"{status_label}\n\n<b>{c.title if c else ''}</b>",
+            reply_markup=menu_kb_s.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
 
 
 # --- Reschedule (assignee picks date + time + writes reason, admins notified) ---
@@ -962,9 +968,8 @@ async def sed_date_save(callback: CallbackQuery, state: FSMContext):
             c.scheduled_date = date.fromisoformat(date_str)
             await session.commit()
     
-    await callback.answer(f"✅ Перенесено на {date_str}")
-    callback.data = f"sedit:{cid}"
-    await sched_edit(callback, state)
+    await callback.message.edit_text(f"✅ Дата изменена: <b>{date_str}</b>", reply_markup=schedule_menu_kb(), parse_mode="HTML")
+    await callback.answer()
 
 
 # --- Edit Time ---
@@ -1002,9 +1007,8 @@ async def sed_time_save(callback: CallbackQuery, state: FSMContext):
             c.scheduled_time = dt_time(h, m)
             await session.commit()
     
-    await callback.answer(f"✅ Время: {time_str}")
-    callback.data = f"sedit:{cid}"
-    await sched_edit(callback, state)
+    await callback.message.edit_text(f"✅ Время изменено: <b>{time_str}</b>", reply_markup=schedule_menu_kb(), parse_mode="HTML")
+    await callback.answer()
 
 
 # --- Edit Assignee ---
@@ -1119,9 +1123,8 @@ async def sed_assign_save(callback: CallbackQuery, state: FSMContext):
                         except Exception:
                             pass
     
-    await callback.answer("✅ Ответственные обновлены")
-    callback.data = f"sedit:{cid}"
-    await sched_edit(callback, state)
+    await callback.message.edit_text("✅ Ответственные обновлены", reply_markup=schedule_menu_kb())
+    await callback.answer()
 
 
 # --- Edit Title ---
@@ -1175,7 +1178,7 @@ async def sed_delete_confirm(callback: CallbackQuery):
             await session.delete(c)
             await session.commit()
     
-    await callback.answer("🗑 Удалено")
+    await callback.answer()
     await callback.message.edit_text("🗑 Задача удалена", reply_markup=schedule_menu_kb())
 
 
@@ -1196,7 +1199,11 @@ async def satt_view(callback: CallbackQuery):
         attachments = result.scalars().all()
     
     if not attachments:
-        await callback.answer("Нет вложений")
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="➕ Прикрепить", callback_data=f"satt_add:{content_id}"))
+        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=f"sedit:{content_id}"))
+        await callback.message.edit_text("📎 Нет вложений", reply_markup=builder.as_markup())
+        await callback.answer()
         return
     
     # Send all attachments
@@ -1221,7 +1228,10 @@ async def satt_view(callback: CallbackQuery):
         except Exception as e:
             print(f"Failed to send attachment: {e}")
     
-    await callback.answer(f"📎 Отправлено {len(attachments)} вложений")
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="◀️ К задаче", callback_data=f"sedit:{content_id}"))
+    await bot.send_message(callback.from_user.id, f"📎 Отправлено {len(attachments)} вложений", reply_markup=builder.as_markup())
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("satt_add:"))
@@ -1302,9 +1312,8 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     if not files:
-        await callback.answer("Ничего не прикреплено")
-        callback.data = f"sedit:{content_id}"
-        await sched_edit(callback)
+        await callback.message.edit_text("📎 Ничего не прикреплено", reply_markup=schedule_menu_kb())
+        await callback.answer()
         return
     
     # Get uploader
@@ -1321,8 +1330,8 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
             ))
         await session.commit()
     
-    await callback.answer(f"✅ {len(files)} вложений сохранено")
-    callback.data = f"sedit:{content_id}"
+    await callback.message.edit_text(f"✅ {len(files)} вложений сохранено", reply_markup=schedule_menu_kb())
+    await callback.answer()
     await sched_edit(callback)
 
 
