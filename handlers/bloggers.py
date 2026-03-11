@@ -30,7 +30,10 @@ def bloggers_menu_kb():
         InlineKeyboardButton(text="🇷🇺 Русские", callback_data="blog:list:ru"),
     )
     builder.row(
+        InlineKeyboardButton(text="🌐 Двуязычные", callback_data="blog:list:both"),
         InlineKeyboardButton(text="📋 Все", callback_data="blog:list:all"),
+    )
+    builder.row(
         InlineKeyboardButton(text="➕ Добавить", callback_data="blog:add"),
     )
     builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
@@ -46,14 +49,17 @@ async def bloggers_menu(callback: CallbackQuery, state: FSMContext):
     async with async_session() as session:
         uz_count = (await session.execute(select(Blogger).where(Blogger.is_active == True, Blogger.language == "uz"))).scalars()
         ru_count = (await session.execute(select(Blogger).where(Blogger.is_active == True, Blogger.language == "ru"))).scalars()
+        both_count = (await session.execute(select(Blogger).where(Blogger.is_active == True, Blogger.language == "both"))).scalars()
         uz = len(list(uz_count))
         ru = len(list(ru_count))
+        bt = len(list(both_count))
     
     text = (
         f"🎬 <b>Блогеры</b>\n\n"
         f"🇺🇿 Узбекские: {uz}\n"
         f"🇷🇺 Русские: {ru}\n"
-        f"📊 Всего: {uz + ru}"
+        f"🌐 Двуязычные: {bt}\n"
+        f"📊 Всего: {uz + ru + bt}"
     )
     
     await callback.message.edit_text(text, reply_markup=bloggers_menu_kb(), parse_mode="HTML")
@@ -74,7 +80,7 @@ async def bloggers_list(callback: CallbackQuery):
         result = await session.execute(query)
         bloggers = result.scalars().all()
     
-    lang_titles = {"uz": "🇺🇿 Узбекские блогеры", "ru": "🇷🇺 Русские блогеры", "all": "📋 Все блогеры"}
+    lang_titles = {"uz": "🇺🇿 Узбекские блогеры", "ru": "🇷🇺 Русские блогеры", "both": "🌐 Двуязычные блогеры", "all": "📋 Все блогеры"}
     
     if not bloggers:
         text = f"<b>{lang_titles.get(lang, 'Блогеры')}</b>\n\n🤷 Список пуст"
@@ -82,11 +88,15 @@ async def bloggers_list(callback: CallbackQuery):
         lines = [f"<b>{lang_titles.get(lang, 'Блогеры')}</b>\n"]
         current_lang = None
         
+        lang_flags = {"uz": "🇺🇿", "ru": "🇷🇺", "both": "🌐"}
+        lang_names = {"uz": "Узбекские", "ru": "Русские", "both": "Двуязычные"}
+        
         for b in bloggers:
             if lang == "all" and b.language != current_lang:
                 current_lang = b.language
-                flag = "🇺🇿" if b.language == "uz" else "🇷🇺"
-                lines.append(f"\n{flag} <b>{'Узбекские' if b.language == 'uz' else 'Русские'}:</b>")
+                flag = lang_flags.get(b.language, "🌐")
+                name = lang_names.get(b.language, "Другие")
+                lines.append(f"\n{flag} <b>{name}:</b>")
             
             tg_link = f" <a href='https://t.me/{b.telegram_username}'>@{b.telegram_username}</a>" if b.telegram_username else ""
             ig_link = f" | <a href='{b.instagram_url}'>Instagram</a>" if b.instagram_url else ""
@@ -121,8 +131,10 @@ async def blogger_view(callback: CallbackQuery):
         await callback.answer()
         return
     
-    flag = "🇺🇿" if b.language == "uz" else "🇷🇺"
-    lang_name = "Узбекский" if b.language == "uz" else "Русский"
+    lang_flags = {"uz": "🇺🇿", "ru": "🇷🇺", "both": "🌐"}
+    lang_names = {"uz": "Узбекский", "ru": "Русский", "both": "Двуязычный"}
+    flag = lang_flags.get(b.language, "🌐")
+    lang_name = lang_names.get(b.language, "Другой")
     
     lines = [f"🎬 <b>{b.name}</b> {flag}\n"]
     lines.append(f"🌐 Язык: {lang_name}")
@@ -159,8 +171,8 @@ async def blogger_toggle_lang(callback: CallbackQuery):
         result = await session.execute(select(Blogger).where(Blogger.id == blogger_id))
         b = result.scalar_one_or_none()
         if b:
-            b.language = "ru" if b.language == "uz" else "uz"
-            new_lang = "🇷🇺 Русский" if b.language == "ru" else "🇺🇿 Узбекский"
+            cycle = {"uz": "ru", "ru": "both", "both": "uz"}
+            b.language = cycle.get(b.language, "uz")
             await session.commit()
     
     await callback.answer()
@@ -222,6 +234,9 @@ async def blogger_add_name(message: Message, state: FSMContext):
     builder.row(
         InlineKeyboardButton(text="🇺🇿 Узбекский", callback_data="blang:uz"),
         InlineKeyboardButton(text="🇷🇺 Русский", callback_data="blang:ru"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🌐 Двуязычный", callback_data="blang:both"),
     )
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"))
     
@@ -338,7 +353,8 @@ async def _save_blogger(event, state: FSMContext):
         session.add(blogger)
         await session.commit()
     
-    flag = "🇺🇿" if data["language"] == "uz" else "🇷🇺"
+    lang_flags = {"uz": "🇺🇿", "ru": "🇷🇺", "both": "🌐"}
+    flag = lang_flags.get(data["language"], "🌐")
     text = f"✅ Блогер <b>{data['name']}</b> {flag} добавлен!"
     
     if isinstance(event, CallbackQuery):
