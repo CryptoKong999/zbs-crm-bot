@@ -194,6 +194,21 @@ class TaskAttachment(Base):
     uploader = relationship("User", foreign_keys=[uploaded_by])
 
 
+class Blogger(Base):
+    """Блогеры для кружков и контента"""
+    __tablename__ = "bloggers"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    telegram_username = Column(String(100))
+    instagram_url = Column(String(300))
+    language = Column(String(10), nullable=False, default="uz")  # "ru" or "uz"
+    notes = Column(Text)
+    is_active = Column(Boolean, default=True)
+    added_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class ContentPlan(Base):
     """Контент-календарь"""
     __tablename__ = "content_plan"

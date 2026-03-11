@@ -22,15 +22,14 @@ def main_menu_kb(role: UserRole = UserRole.MEMBER, username: str = "") -> Inline
         InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
         InlineKeyboardButton(text="👥 Клиенты", callback_data="menu:clients"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🎬 Блогеры", callback_data="menu:bloggers"),
+        InlineKeyboardButton(text="📊 Отчёт дня", callback_data="menu:report"),
+    )
     show_finance = (username or "").lower() in FINANCE_USERNAMES
     if show_finance:
         builder.row(
             InlineKeyboardButton(text="💰 Финансы", callback_data="menu:finance"),
-            InlineKeyboardButton(text="📊 Отчёт дня", callback_data="menu:report"),
-        )
-    else:
-        builder.row(
-            InlineKeyboardButton(text="📊 Отчёт дня", callback_data="menu:report"),
         )
     if role in (UserRole.ADMIN, UserRole.MANAGER):
         builder.row(

@@ -28,7 +28,7 @@ from database import init_db, seed_defaults
 from seed import seed as seed_data
 from handlers import (
     common_router, fallback_router, schedule_router, crm_router,
-    finance_router, report_router
+    finance_router, report_router, bloggers_router
 )
 from handlers.common import ADMIN_IDS
 from handlers.report import (
@@ -107,6 +107,7 @@ async def main():
     dp.include_router(crm_router)
     dp.include_router(finance_router)
     dp.include_router(report_router)
+    dp.include_router(bloggers_router)
     dp.include_router(fallback_router)  # catches unhandled messages
     
     # Setup scheduler

@@ -940,8 +940,8 @@ async def resched_reason(message: Message, state: FSMContext):
         # Add reason to description
         old_desc = c.description or ""
         timestamp = datetime.now().strftime("%d.%m %H:%M")
-        assignee_name = c.assignee.full_name if c.assignee else "?"
-        reschedule_note = f"\n⏩ Перенос ({timestamp}) {assignee_name}: {reason}"
+        who_rescheduled = message.from_user.full_name
+        reschedule_note = f"\n⏩ Перенос ({timestamp}) {who_rescheduled}: {reason}"
         c.description = (old_desc + reschedule_note).strip()
         
         await session.commit()
