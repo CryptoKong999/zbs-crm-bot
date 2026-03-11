@@ -802,18 +802,36 @@ async def sched_status(callback: CallbackQuery):
             bot = callback.message.bot
             who = callback.from_user.full_name
             status_text = STATUS_EMOJI.get(new_status, "") + " " + new_status.value
+            creator_name = c.creator.full_name if c.creator else "—"
+            
+            # Build assignee names
+            names = [u.full_name for u in c.assignees] if c.assignees else []
+            if not names and c.assignee:
+                names = [c.assignee.full_name]
+            assignees_str = ", ".join(names) if names else "не назначен"
+            
+            weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            day_name = weekdays[c.scheduled_date.weekday()]
+            time_str = c.scheduled_time.strftime("%H:%M") if c.scheduled_time else ""
             
             if new_status == ContentStatus.PUBLISHED:
                 notify_text = (
                     f"✅ <b>Задача выполнена!</b>\n\n"
                     f"<b>{c.title}</b>\n"
-                    f"👤 {who}"
+                    f"📅 {day_name} {c.scheduled_date.strftime('%d.%m')} {time_str}\n\n"
+                    f"👤 Выполнил: <b>{who}</b>\n"
+                    f"📌 Поставил: {creator_name}\n"
+                    f"👥 Ответственные: {assignees_str}"
                 )
             else:
                 notify_text = (
-                    f"📋 <b>{who}</b> обновил статус:\n\n"
+                    f"📋 <b>Изменение статуса</b>\n\n"
                     f"<b>{c.title}</b>\n"
-                    f"Статус: {status_text}"
+                    f"📅 {day_name} {c.scheduled_date.strftime('%d.%m')} {time_str}\n\n"
+                    f"Статус: {status_text}\n"
+                    f"👤 Изменил: <b>{who}</b>\n"
+                    f"📌 Поставил: {creator_name}\n"
+                    f"👥 Ответственные: {assignees_str}"
                 )
             
             await notify_task_people(bot, c, callback.from_user.id, notify_text)
@@ -934,10 +952,11 @@ async def resched_reason(message: Message, state: FSMContext):
         
         notify = (
             f"📆 <b>Перенос задачи</b>\n\n"
-            f"<b>{c.title}</b>\n"
-            f"👤 {assignee_name}\n\n"
+            f"<b>{c.title}</b>\n\n"
             f"Было: {old_date} {old_time}\n"
             f"Стало: <b>{new_day} {new_date.strftime('%d.%m')} {new_time}</b>\n\n"
+            f"👤 Перенёс: <b>{message.from_user.full_name}</b>\n"
+            f"📌 Поставил: {c.creator.full_name if c.creator else '—'}\n\n"
             f"💬 Причина: <i>{reason}</i>"
         )
         
@@ -988,7 +1007,8 @@ async def sed_date_save(callback: CallbackQuery, state: FSMContext):
             await session.commit()
             
             who = callback.from_user.full_name
-            notify = f"📅 <b>{who}</b> изменил дату:\n\n<b>{c.title}</b>\nНовая дата: <b>{date_str}</b>"
+            creator_name = c.creator.full_name if c.creator else "—"
+            notify = f"📅 <b>{who}</b> изменил дату:\n\n<b>{c.title}</b>\nНовая дата: <b>{date_str}</b>\n\n📌 Поставил: {creator_name}"
             await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
     await callback.message.edit_text(f"✅ Дата изменена: <b>{date_str}</b>", reply_markup=nav_kb(cid), parse_mode="HTML")
@@ -1034,7 +1054,8 @@ async def sed_time_save(callback: CallbackQuery, state: FSMContext):
             await session.commit()
             
             who = callback.from_user.full_name
-            notify = f"🕐 <b>{who}</b> изменил время:\n\n<b>{c.title}</b>\nНовое время: <b>{time_str}</b>"
+            creator_name = c.creator.full_name if c.creator else "—"
+            notify = f"🕐 <b>{who}</b> изменил время:\n\n<b>{c.title}</b>\nНовое время: <b>{time_str}</b>\n\n📌 Поставил: {creator_name}"
             await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
     await callback.message.edit_text(f"✅ Время изменено: <b>{time_str}</b>", reply_markup=nav_kb(cid), parse_mode="HTML")
@@ -1186,7 +1207,8 @@ async def sed_title_save(message: Message, state: FSMContext):
             await session.commit()
             
             who = message.from_user.full_name
-            notify = f"✏️ <b>{who}</b> переименовал задачу:\n\n<s>{old_title}</s>\n→ <b>{message.text}</b>"
+            creator_name = c.creator.full_name if c.creator else "—"
+            notify = f"✏️ <b>{who}</b> переименовал задачу:\n\n<s>{old_title}</s>\n→ <b>{message.text}</b>\n\n📌 Поставил: {creator_name}"
             await notify_task_people(message.bot, c, message.from_user.id, notify)
     
     await message.answer(f"✅ Название: <b>{message.text}</b>", parse_mode="HTML", reply_markup=nav_kb(cid))
@@ -1217,7 +1239,8 @@ async def sed_delete_confirm(callback: CallbackQuery):
         c = result.scalar_one_or_none()
         if c:
             who = callback.from_user.full_name
-            notify = f"🗑 <b>{who}</b> удалил задачу:\n\n<s>{c.title}</s>"
+            creator_name = c.creator.full_name if c.creator else "—"
+            notify = f"🗑 <b>{who}</b> удалил задачу:\n\n<s>{c.title}</s>\n\n📌 Поставил: {creator_name}"
             await notify_task_people(callback.message.bot, c, callback.from_user.id, notify, nav_kb())
             
             await session.delete(c)
@@ -1389,7 +1412,7 @@ async def satt_save(callback: CallbackQuery, state: FSMContext):
             type_emoji = {"photo": "📷", "voice": "🎤", "video": "🎬", "video_note": "⭕", "document": "📄"}
             types_str = ", ".join(f"{type_emoji.get(t, '📎')}{n}" for t, n in type_counts.items())
             
-            notify = f"📎 <b>{who}</b> добавил вложения к задаче:\n\n<b>{c.title}</b>\n{types_str}"
+            notify = f"📎 <b>{who}</b> добавил вложения к задаче:\n\n<b>{c.title}</b>\n{types_str}\n\n📌 Поставил: {c.creator.full_name if c.creator else '—'}"
             await notify_task_people(callback.message.bot, c, callback.from_user.id, notify)
     
     await callback.message.edit_text(f"✅ {len(files)} вложений сохранено", reply_markup=nav_kb(content_id))
