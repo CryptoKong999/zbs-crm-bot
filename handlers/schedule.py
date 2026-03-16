@@ -131,6 +131,7 @@ def schedule_menu_kb():
     )
     builder.row(
         InlineKeyboardButton(text="📅 След. неделя", callback_data="sched:nextweek"),
+        InlineKeyboardButton(text="🚨 Просроченные", callback_data="sched:overdue"),
     )
     builder.row(
         InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main"),
@@ -259,6 +260,104 @@ async def sched_nextweek(callback: CallbackQuery):
     next_monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
     next_sunday = next_monday + timedelta(days=6)
     await _show_week(callback, next_monday, f"След. неделя ({next_monday.strftime('%d.%m')} — {next_sunday.strftime('%d.%m')})")
+
+
+# ==================== Overdue ====================
+
+@router.callback_query(F.data == "sched:overdue")
+async def sched_overdue(callback: CallbackQuery):
+    today = date.today()
+    
+    async with async_session() as session:
+        result = await session.execute(
+            select(ContentPlan)
+            .options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.project))
+            .where(and_(
+                ContentPlan.scheduled_date < today,
+                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])
+            ))
+            .order_by(ContentPlan.scheduled_date.asc())
+        )
+        items = result.scalars().all()
+    
+    if not items:
+        text = "🚨 <b>Просроченные</b>\n\n✨ Нет просроченных задач!"
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"))
+        builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        await callback.answer()
+        return
+    
+    lines = [f"🚨 <b>Просроченные ({len(items)})</b>\n"]
+    lines.append("Нажми ✅ чтобы закрыть, ❌ чтобы отменить\n")
+    
+    builder = InlineKeyboardBuilder()
+    for c in items:
+        days = (today - c.scheduled_date).days
+        assignee = f" → {c.assignee.full_name}" if c.assignee else ""
+        project = f" [{c.project.emoji}]" if c.project else ""
+        lines.append(f"⚠️ <b>{c.title}</b>{assignee}{project} ({days}д)")
+        
+        short = c.title[:16] + ".." if len(c.title) > 16 else c.title
+        builder.row(
+            InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:published"),
+            InlineKeyboardButton(text="📆", callback_data=f"sed_date:{c.id}"),
+            InlineKeyboardButton(text="❌", callback_data=f"sst:{c.id}:cancelled"),
+        )
+    
+    builder.row(InlineKeyboardButton(text="🗑 Закрыть все", callback_data="sched:closeall"))
+    builder.row(
+        InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"),
+    )
+    
+    await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sched:closeall")
+async def sched_close_all_overdue(callback: CallbackQuery):
+    """Close all overdue tasks at once"""
+    today = date.today()
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, закрыть все", callback_data="sched:closeall_yes"),
+        InlineKeyboardButton(text="❌ Нет", callback_data="sched:overdue"),
+    )
+    
+    await callback.message.edit_text(
+        "🗑 <b>Закрыть все просроченные задачи?</b>\n\nСтатус будет изменён на ✅ Выполнено",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sched:closeall_yes")
+async def sched_close_all_yes(callback: CallbackQuery):
+    today = date.today()
+    
+    async with async_session() as session:
+        result = await session.execute(
+            select(ContentPlan).where(and_(
+                ContentPlan.scheduled_date < today,
+                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])
+            ))
+        )
+        items = result.scalars().all()
+        count = len(items)
+        for c in items:
+            c.status = ContentStatus.PUBLISHED
+        await session.commit()
+    
+    await callback.message.edit_text(
+        f"✅ <b>{count} задач закрыто</b>",
+        reply_markup=nav_kb(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 
 # ==================== My Tasks (only mine) ====================

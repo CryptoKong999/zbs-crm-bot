@@ -104,11 +104,34 @@ async def daily_report(event, state=None):
         report = await generate_daily_report()
     except Exception as e:
         report = f"❌ Ошибка генерации отчёта:\n<code>{str(e)[:200]}</code>"
+    
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    builder = InlineKeyboardBuilder()
+    
+    # Check if there are overdue tasks
+    today = date.today()
+    async with async_session() as session:
+        from sqlalchemy import func as sqlfunc
+        overdue_count = (await session.execute(
+            select(sqlfunc.count(ContentPlan.id)).where(
+                ContentPlan.scheduled_date < today,
+                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])
+            )
+        )).scalar() or 0
+    
+    if overdue_count:
+        builder.row(InlineKeyboardButton(text=f"🚨 Просроченные ({overdue_count})", callback_data="sched:overdue"))
+    builder.row(
+        InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"),
+    )
+    
     if isinstance(event, CallbackQuery):
-        await event.message.edit_text(report, reply_markup=back_to_menu_kb(), parse_mode="HTML")
+        await event.message.edit_text(report, reply_markup=builder.as_markup(), parse_mode="HTML")
         await event.answer()
     else:
-        await event.answer(report, reply_markup=back_to_menu_kb(), parse_mode="HTML")
+        await event.answer(report, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
 # ==================== REMINDERS ====================
@@ -240,7 +263,10 @@ async def send_hourly_reminders(bot: Bot):
 
 
 async def send_overdue_alerts(bot: Bot):
-    """11:00 — Alert admins about overdue"""
+    """11:00 — Alert admins about overdue with action buttons"""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
     today = date.today()
     async with async_session() as session:
         result = await session.execute(
@@ -254,13 +280,22 @@ async def send_overdue_alerts(bot: Bot):
         return
     
     lines = [f"🚨 <b>Просрочено ({len(overdue)}):</b>\n"]
+    builder = InlineKeyboardBuilder()
     for c in overdue:
         a = f" → {c.assignee.full_name}" if c.assignee else ""
-        lines.append(f"⚠️ {c.title}{a} ({(today - c.scheduled_date).days}д)")
+        days = (today - c.scheduled_date).days
+        lines.append(f"⚠️ {c.title}{a} ({days}д)")
+        short = c.title[:18] + ".." if len(c.title) > 18 else c.title
+        builder.row(
+            InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:published"),
+            InlineKeyboardButton(text=f"❌", callback_data=f"sst:{c.id}:cancelled"),
+        )
+    builder.row(InlineKeyboardButton(text="🚨 Все просроченные", callback_data="sched:overdue"))
+    builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
     
     text = "\n".join(lines)
     for aid in [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]:
         try:
-            await bot.send_message(aid, text, parse_mode="HTML")
+            await bot.send_message(aid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"Overdue alert failed: {e}")
