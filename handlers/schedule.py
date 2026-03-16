@@ -131,7 +131,6 @@ def schedule_menu_kb():
     )
     builder.row(
         InlineKeyboardButton(text="📅 След. неделя", callback_data="sched:nextweek"),
-        InlineKeyboardButton(text="🚨 Просроченные", callback_data="sched:overdue"),
     )
     builder.row(
         InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main"),

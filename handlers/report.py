@@ -108,20 +108,6 @@ async def daily_report(event, state=None):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
     builder = InlineKeyboardBuilder()
-    
-    # Check if there are overdue tasks
-    today = date.today()
-    async with async_session() as session:
-        from sqlalchemy import func as sqlfunc
-        overdue_count = (await session.execute(
-            select(sqlfunc.count(ContentPlan.id)).where(
-                ContentPlan.scheduled_date < today,
-                ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])
-            )
-        )).scalar() or 0
-    
-    if overdue_count:
-        builder.row(InlineKeyboardButton(text=f"🚨 Просроченные ({overdue_count})", callback_data="sched:overdue"))
     builder.row(
         InlineKeyboardButton(text="📅 Расписание", callback_data="menu:content"),
         InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"),
@@ -196,10 +182,11 @@ async def send_morning_reminders(bot: Bot):
 
 
 async def send_day_before_reminders(bot: Bot):
-    """20:00 — Remind assignees about tomorrow's tasks"""
+    """20:00 — 1) Remind about tomorrow, 2) Ask about today's unfinished tasks"""
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
     
+    # === Part 1: Tomorrow preview ===
     tomorrow = date.today() + timedelta(days=1)
     wd = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     items = await _get_items_for_date(tomorrow)
@@ -218,17 +205,40 @@ async def send_day_before_reminders(bot: Bot):
             await bot.send_message(tg_id, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"Day-before remind failed {tg_id}: {e}")
+    
+    # === Part 2: Today's unfinished — "Ты выполнил?" ===
+    today_items = await _get_items_for_date(date.today())
+    for tg_id, tasks in _group_by_user(today_items).items():
+        # Only tasks without scheduled_time (timed ones are handled hourly)
+        no_time_tasks = [c for c in tasks if not c.scheduled_time]
+        if not no_time_tasks:
+            continue
+        
+        lines = [f"⏰ <b>Ты выполнил эти задачи?</b>\n"]
+        builder = InlineKeyboardBuilder()
+        for c in no_time_tasks:
+            lines.append(f"  📝 {c.title}")
+            short = c.title[:16] + ".." if len(c.title) > 16 else c.title
+            builder.row(
+                InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:published"),
+                InlineKeyboardButton(text=f"📆", callback_data=f"resched:{c.id}"),
+            )
+        try:
+            await bot.send_message(tg_id, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+        except Exception as e:
+            print(f"Evening check failed {tg_id}: {e}")
 
 
 async def send_hourly_reminders(bot: Bot):
-    """Every hour — notify if task starts in next hour"""
+    """Every hour: 1) remind 1hr before, 2) ask 'did you finish?' 1hr after deadline"""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    
     now = datetime.now(TZ)
     today = now.date()
     current_h = now.hour
     next_h = current_h + 1
-    
-    if next_h > 23:
-        return
+    prev_h = current_h - 1
     
     async with async_session() as session:
         result = await session.execute(
@@ -242,35 +252,55 @@ async def send_hourly_reminders(bot: Bot):
         items = result.scalars().all()
     
     for c in items:
-        if c.scheduled_time and c.scheduled_time.hour == next_h:
-            from aiogram.utils.keyboard import InlineKeyboardBuilder
-            from aiogram.types import InlineKeyboardButton
-            
+        users = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
+        
+        # 1) Remind 1 hour BEFORE
+        if next_h <= 23 and c.scheduled_time and c.scheduled_time.hour == next_h:
             text = f"🔔 <b>Через час ({c.scheduled_time.strftime('%H:%M')}):</b>\n\n{c.title}"
             builder = InlineKeyboardBuilder()
             builder.row(
                 InlineKeyboardButton(text="✅ В работе", callback_data=f"sst:{c.id}:progress"),
                 InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{c.id}"),
             )
-            
-            users = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
             for u in users:
                 if u and u.telegram_id and u.telegram_id != 0:
                     try:
                         await bot.send_message(u.telegram_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
                     except Exception as e:
-                        print(f"Hourly remind failed: {e}")
+                        print(f"Before-deadline remind failed: {e}")
+        
+        # 2) Ask "did you finish?" 1 hour AFTER deadline
+        if prev_h >= 0 and c.scheduled_time and c.scheduled_time.hour == prev_h:
+            text = (
+                f"⏰ <b>Ты выполнил эту задачу?</b>\n\n"
+                f"<b>{c.title}</b>\n"
+                f"🕐 Дедлайн был: {c.scheduled_time.strftime('%H:%M')}\n"
+            )
+            builder = InlineKeyboardBuilder()
+            builder.row(
+                InlineKeyboardButton(text="✅ Да, выполнил", callback_data=f"sst:{c.id}:published"),
+            )
+            builder.row(
+                InlineKeyboardButton(text="📆 Перенести", callback_data=f"resched:{c.id}"),
+                InlineKeyboardButton(text="❌ Не актуально", callback_data=f"sst:{c.id}:cancelled"),
+            )
+            for u in users:
+                if u and u.telegram_id and u.telegram_id != 0:
+                    try:
+                        await bot.send_message(u.telegram_id, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+                    except Exception as e:
+                        print(f"Post-deadline check failed: {e}")
 
 
 async def send_overdue_alerts(bot: Bot):
-    """11:00 — Alert admins about overdue with action buttons"""
+    """11:00 — Send 'Ты выполнил?' to assignees + summary to admins"""
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
     
     today = date.today()
     async with async_session() as session:
         result = await session.execute(
-            select(ContentPlan).options(selectinload(ContentPlan.assignee))
+            select(ContentPlan).options(selectinload(ContentPlan.assignee), selectinload(ContentPlan.assignees))
             .where(and_(ContentPlan.scheduled_date < today, ContentPlan.status.in_([ContentStatus.PLANNED, ContentStatus.IN_PROGRESS])))
             .order_by(ContentPlan.scheduled_date.asc())
         )
@@ -279,23 +309,50 @@ async def send_overdue_alerts(bot: Bot):
     if not overdue:
         return
     
-    lines = [f"🚨 <b>Просрочено ({len(overdue)}):</b>\n"]
+    # 1) Send "Ты выполнил?" to each assignee
+    by_user = {}
+    for c in overdue:
+        users = c.assignees if c.assignees else ([c.assignee] if c.assignee else [])
+        for u in users:
+            if u and u.telegram_id and u.telegram_id != 0:
+                by_user.setdefault(u.telegram_id, []).append(c)
+    
+    for tg_id, tasks in by_user.items():
+        lines = [f"⏰ <b>У тебя есть незакрытые задачи:</b>\n"]
+        builder = InlineKeyboardBuilder()
+        for c in tasks:
+            days = (today - c.scheduled_date).days
+            lines.append(f"  ⚠️ {c.title} ({days}д назад)")
+            short = c.title[:16] + ".." if len(c.title) > 16 else c.title
+            builder.row(
+                InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:published"),
+                InlineKeyboardButton(text="📆", callback_data=f"resched:{c.id}"),
+            )
+        builder.row(InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"))
+        try:
+            await bot.send_message(tg_id, "\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+        except Exception as e:
+            print(f"Overdue ping failed {tg_id}: {e}")
+    
+    # 2) Summary to admins with close buttons
+    lines = [f"🚨 <b>Незакрытые задачи ({len(overdue)}):</b>\n"]
     builder = InlineKeyboardBuilder()
     for c in overdue:
         a = f" → {c.assignee.full_name}" if c.assignee else ""
         days = (today - c.scheduled_date).days
         lines.append(f"⚠️ {c.title}{a} ({days}д)")
-        short = c.title[:18] + ".." if len(c.title) > 18 else c.title
+        short = c.title[:16] + ".." if len(c.title) > 16 else c.title
         builder.row(
             InlineKeyboardButton(text=f"✅ {short}", callback_data=f"sst:{c.id}:published"),
             InlineKeyboardButton(text=f"❌", callback_data=f"sst:{c.id}:cancelled"),
         )
-    builder.row(InlineKeyboardButton(text="🚨 Все просроченные", callback_data="sched:overdue"))
-    builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main"))
+    builder.row(InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main"))
     
     text = "\n".join(lines)
-    for aid in [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]:
-        try:
-            await bot.send_message(aid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
-        except Exception as e:
-            print(f"Overdue alert failed: {e}")
+    admin_ids = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+    for aid in admin_ids:
+        if aid not in by_user:  # don't double-send to admins who are also assignees
+            try:
+                await bot.send_message(aid, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+            except Exception as e:
+                print(f"Overdue admin alert failed: {e}")
