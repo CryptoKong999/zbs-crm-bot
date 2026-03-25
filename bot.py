@@ -20,6 +20,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from pg_storage import PostgreSQLStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -98,7 +99,10 @@ async def main():
             link_preview_is_disabled=True
         )
     )
-    storage = MemoryStorage()
+    # Persistent FSM storage — survives bot restarts
+    from database import async_session
+    storage = PostgreSQLStorage(async_session)
+    await storage.init()
     dp = Dispatcher(storage=storage)
     
     # Register routers (order matters — fallback must be LAST)
